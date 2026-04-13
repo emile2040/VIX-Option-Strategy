@@ -9,6 +9,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from pricing.futures import vix_futures_price, vix_futures_term_structure
+from pricing.options import black76
 from data.ibkr import fetch_vix_data
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -101,21 +102,7 @@ with st.sidebar:
 
     r = st.number_input("Risk-free rate  (r)", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
 
-    st.divider()
-    st.subheader("Price on Specific Date")
     today = datetime.date.today()
-    target_date = st.date_input(
-        "Target expiry date",
-        value=today + datetime.timedelta(days=30),
-        min_value=today + datetime.timedelta(days=1),
-    )
-    tau_custom = (target_date - today).days / 365.0
-    custom_price = vix_futures_price(V0, kappa, theta_bar, sigma, r, tau_custom)
-    st.metric(
-        label=f"Futures Price  ({target_date.strftime('%d %b %Y')})",
-        value=f"{custom_price:.4f}",
-        help=f"τ = {tau_custom:.4f} yrs  ({(target_date - today).days} days)",
-    )
 
 # ── Fixed maturity schedule ───────────────────────────────────────────────────
 SCHEDULE = [
@@ -169,15 +156,6 @@ with col_chart:
         marker=dict(size=8),
         line=dict(width=2.5),
         name="Futures Price",
-    ))
-
-    x_custom_label = target_date.strftime("%d %b %y")
-    fig.add_trace(go.Scatter(
-        x=[tau_custom],
-        y=[custom_price],
-        mode="markers",
-        marker=dict(size=12, symbol="diamond", color="gold"),
-        name=f"Custom date ({x_custom_label})",
     ))
 
     fig.add_hline(
@@ -244,6 +222,65 @@ col2.metric("1w Future",   f"{price_by_tenor['1w']:.2f}")
 col3.metric("1m Future",   f"{price_by_tenor['1m']:.2f}")
 col4.metric("6m Future",   f"{price_by_tenor['6m']:.2f}")
 col5.metric("12m Future",  f"{price_by_tenor['12m']:.2f}")
+
+# ── Options Pricer (Black-76) ─────────────────────────────────────────────────
+st.divider()
+st.header("Options Pricer — Black-76")
+
+with st.container():
+    oc1, oc2, oc3 = st.columns(3, gap="large")
+
+    with oc1:
+        opt_expiry = st.date_input(
+            "Option Expiry Date",
+            value=today + datetime.timedelta(days=30),
+            min_value=today + datetime.timedelta(days=1),
+            key="opt_expiry",
+        )
+        opt_type = st.selectbox("Option Type", ["Call", "Put"], index=1, key="opt_type")
+
+    with oc2:
+        opt_tau = (opt_expiry - today).days / 365.0
+        F_model = vix_futures_price(V0, kappa, theta_bar, sigma, r, opt_tau)
+        st.metric(
+            label="Model Futures Price at Expiry",
+            value=f"{F_model:.4f}",
+            help=f"τ = {opt_tau:.4f} yrs  ({(opt_expiry - today).days} days)",
+        )
+        strike = st.number_input(
+            "Strike  (K)",
+            min_value=1.0, max_value=200.0,
+            value=round(F_model, 1),
+            step=0.5, format="%.2f",
+            key="opt_strike",
+        )
+
+    with oc3:
+        result = black76(F_model, strike, r, sigma, opt_tau, opt_type.lower())
+        st.metric("Option Price", f"{result['price']:.4f}")
+
+st.subheader("Greeks")
+gc1, gc2, gc3, gc4, gc5 = st.columns(5)
+gc1.metric("Delta  (Δ)", f"{result['delta']:.4f}"  if result["delta"]  is not None else "—")
+gc2.metric("Gamma  (Γ)", f"{result['gamma']:.6f}"  if result["gamma"]  is not None else "—")
+gc3.metric("Vega  (ν)",  f"{result['vega']:.4f}"   if result["vega"]   is not None else "—",
+           help="per 1% change in σ")
+gc4.metric("Theta  (Θ)", f"{result['theta']:.4f}"  if result["theta"]  is not None else "—",
+           help="per calendar day")
+gc5.metric("Rho  (ρ)",   f"{result['rho']:.4f}"    if result["rho"]    is not None else "—")
+
+with st.expander("Model details", expanded=False):
+    st.markdown(f"""
+| Parameter | Value |
+|---|---|
+| Futures Price  (F) | {F_model:.4f} |
+| Strike  (K) | {strike:.4f} |
+| Time to Expiry  (T) | {opt_tau:.4f} yrs  ({(opt_expiry - today).days} days) |
+| Vol-of-Vol  (σ) | {sigma * 100:.2f}% |
+| Risk-free rate  (r) | {r * 100:.2f}% |
+| d1 | {result['d1'] if result['d1'] is not None else '—'} |
+| d2 | {result['d2'] if result['d2'] is not None else '—'} |
+""")
 
 # ── Vol-of-Vol Reference ──────────────────────────────────────────────────────
 st.divider()
