@@ -402,73 +402,10 @@ with tab_pricer:
 with tab_spreads:
     st.header("VIX Put Strategy — Historical Simulation")
 
-    # ── Strategy selector ─────────────────────────────────────────────────────
-    strategy = st.selectbox(
-        "Strategy",
-        ["Short Put Spread", "Long Put Spread", "Short Put", "Long Put"],
-        key="strategy",
-        help=(
-            "Short Put Spread: sell higher-K put, buy lower-K put as hedge  |  "
-            "Long Put Spread: buy higher-K put, sell lower-K put as hedge  |  "
-            "Short Put: sell a single put  |  "
-            "Long Put: buy a single put"
-        ),
-    )
-    is_spread = strategy in ["Short Put Spread", "Long Put Spread"]
-    is_short  = strategy in ["Short Put Spread", "Short Put"]
-
-    # Leg labels
-    LEG_LABELS = {
-        "Short Put Spread": ("Short Put  (sell)",          "Long Put  (buy — hedge)"),
-        "Long Put Spread":  ("Long Put  (buy)",            "Short Put  (sell — hedge)"),
-        "Short Put":        ("Put  (sell)",                None),
-        "Long Put":         ("Put  (buy)",                 None),
-    }
-    leg1_label, leg2_label = LEG_LABELS[strategy]
-
-    # ── Strategy Parameters ───────────────────────────────────────────────────
-    st.subheader("Strategy Parameters")
-    sp1, sp2 = st.columns(2, gap="large")
-    with sp1:
-        st.markdown(f"**{leg1_label}**")
-        short_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=19.0,  step=0.5,  format="%.2f", key="short_strike")
-        short_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=-0.05, step=0.05, format="%.2f", key="short_vol_shift",
-                                          help="Additive shift on σ for this leg")
-    with sp2:
-        if is_spread:
-            st.markdown(f"**{leg2_label}**")
-            long_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=15.0,  step=0.5,  format="%.2f", key="long_strike")
-            long_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=0.05,  step=0.05, format="%.2f", key="long_vol_shift",
-                                             help="Additive shift on σ for this leg")
-        else:
-            long_strike    = None
-            long_vol_shift = 0.0
-
-    st.divider()
-    st.markdown("**Trade Execution**")
-    tc1, tc2, tc3 = st.columns(3, gap="large")
-    with tc1:
-        min_days_to_expiry = st.number_input(
-            "Minimum calendar days before a Wednesday expiry",
-            min_value=1, max_value=60, value=10, step=1, key="min_dte",
-            help="Expiry used = first Wednesday at least this many days ahead",
-        )
-    with tc2:
-        trading_cost = st.number_input(
-            "Trading cost on premium  ($)",
-            min_value=0.0, max_value=10.0, value=0.05, step=0.01, format="%.2f", key="trading_cost",
-            help="Added to premium paid (long) or subtracted from premium received (short)",
-        )
-    with tc3:
-        n_contracts = st.number_input(
-            "Number of options  (lot size 100)",
-            min_value=1, max_value=10000, value=1, step=1, key="n_contracts",
-            help="Number of options per trade (lot size = 100)",
-        )
-
-    # ── VIX Historical Data (status) ──────────────────────────────────────────
-    st.divider()
+    # ── VIX data status (outside form — always visible) ───────────────────────
     vh = st.session_state.vix_history
+    data_start = vh["Date"].iloc[0].date()  if vh is not None else datetime.date(1990, 1, 2)
+    data_end   = vh["Date"].iloc[-1].date() if vh is not None else today
     if vh is not None:
         st.caption(
             f"VIX data loaded: {vh['Date'].iloc[0].strftime('%d %b %Y')} → "
@@ -478,88 +415,121 @@ with tab_spreads:
     else:
         st.warning("No VIX data loaded — go to the **Futures & Options Pricer** tab to download it.")
 
-    # ── Simulation Date Range ─────────────────────────────────────────────────
+    # ── Strategy selector (outside form — updates labels & legs immediately) ────
+    strategy = st.selectbox(
+        "Strategy",
+        ["Short Put Spread", "Long Put Spread", "Short Put", "Long Put"],
+        key="strategy",
+        help=(
+            "Short Put Spread: sell higher-K put, buy lower-K put as hedge  |  "
+            "Long Put Spread: buy higher-K put, sell lower-K put as hedge  |  "
+            "Short Put: sell a single put  |  Long Put: buy a single put"
+        ),
+    )
+    is_spread = strategy in ["Short Put Spread", "Long Put Spread"]
+    is_short  = strategy in ["Short Put Spread", "Short Put"]
+    LEG_LABELS = {
+        "Short Put Spread": ("Short Put  (sell)",  "Long Put  (buy — hedge)"),
+        "Long Put Spread":  ("Long Put  (buy)",    "Short Put  (sell — hedge)"),
+        "Short Put":        ("Put  (sell)",        None),
+        "Long Put":         ("Put  (buy)",         None),
+    }
+    leg1_label, leg2_label = LEG_LABELS[strategy]
+
+    # ── All other inputs wrapped in a form — no re-run until Run Simulation ───
+    with st.form("sim_form"):
+        st.subheader("Strategy Parameters")
+        sp1, sp2 = st.columns(2, gap="large")
+        with sp1:
+            st.markdown(f"**{leg1_label}**")
+            short_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=19.0,  step=0.5,  format="%.2f", key="short_strike")
+            short_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=-0.05, step=0.05, format="%.2f", key="short_vol_shift")
+        with sp2:
+            if is_spread:
+                st.markdown(f"**{leg2_label}**")
+                long_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=15.0, step=0.5,  format="%.2f", key="long_strike")
+                long_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=0.05, step=0.05, format="%.2f", key="long_vol_shift")
+            else:
+                long_strike, long_vol_shift = None, 0.0
+
+        st.divider()
+        st.markdown("**Trade Execution**")
+        tc1, tc2, tc3 = st.columns(3, gap="large")
+        with tc1:
+            min_days_to_expiry = st.number_input(
+                "Minimum calendar days before a Wednesday expiry",
+                min_value=1, max_value=60, value=10, step=1, key="min_dte")
+        with tc2:
+            trading_cost = st.number_input(
+                "Trading cost on premium  ($)",
+                min_value=0.0, max_value=10.0, value=0.05, step=0.01, format="%.2f", key="trading_cost")
+        with tc3:
+            n_contracts = st.number_input(
+                "Number of options  (lot size 100)",
+                min_value=1, max_value=10000, value=1, step=1, key="n_contracts")
+
+        st.divider()
+        st.subheader("Simulation Date Range")
+        dr1, dr2 = st.columns(2, gap="large")
+        with dr1:
+            sim_start = st.date_input("Start date", value=data_start,
+                                      min_value=data_start, max_value=data_end, key="sim_start")
+        with dr2:
+            sim_end = st.date_input("End date", value=data_end,
+                                    min_value=data_start, max_value=data_end, key="sim_end")
+
+        st.divider()
+        run_sim = st.form_submit_button("▶ Run Simulation", type="primary")
+
+    # ── Filters (outside form — toggle flips immediately grey/ungrey inputs) ──
     st.divider()
-    st.subheader("Simulation Date Range")
-
-    vh = st.session_state.vix_history
-    data_start = vh["Date"].iloc[0].date()  if vh is not None else datetime.date(1990, 1, 2)
-    data_end   = vh["Date"].iloc[-1].date() if vh is not None else today
-
-    dr1, dr2 = st.columns(2, gap="large")
-    with dr1:
-        sim_start = st.date_input("Start date", value=data_start,
-                                  min_value=data_start, max_value=data_end, key="sim_start")
-    with dr2:
-        sim_end = st.date_input("End date", value=data_end,
-                                min_value=data_start, max_value=data_end, key="sim_end")
-
-    if sim_start >= sim_end:
-        st.warning("Start date must be before end date.")
-
-    # ── VIX Entry Level Filter ────────────────────────────────────────────────
-    st.divider()
-    vf_col1, vf_col2, vf_col3 = st.columns([2, 1, 1], gap="large")
+    # VIX entry range filter
+    apply_vix_filter = st.toggle(
+        "Filter by VIX entry level  (only trade when VIX is within the range below)",
+        value=True, key="apply_vix_filter")
+    vf_col1, vf_col2 = st.columns(2, gap="large")
     with vf_col1:
-        no_vix_filter = st.toggle(
-            "No VIX entry filter — trade at all VIX levels",
-            value=False, key="no_vix_filter",
-        )
-    with vf_col2:
         vix_entry_min = st.number_input(
-            "Min Entry VIX", min_value=0.0, max_value=200.0, value=10.0,
-            step=0.5, format="%.1f", key="vix_entry_min",
-            disabled=no_vix_filter,
-            help="Only enter a trade if Spot VIX ≥ this value",
-        )
-    with vf_col3:
+            "Min Entry VIX", min_value=0.0, max_value=200.0,
+            value=10.0, step=0.5, format="%.1f",
+            key="vix_entry_min", disabled=not apply_vix_filter)
+    with vf_col2:
         vix_entry_max = st.number_input(
-            "Max Entry VIX", min_value=0.0, max_value=200.0, value=40.0,
-            step=0.5, format="%.1f", key="vix_entry_max",
-            disabled=no_vix_filter,
-            help="Only enter a trade if Spot VIX ≤ this value",
-        )
-    if no_vix_filter:
+            "Max Entry VIX", min_value=0.0, max_value=200.0,
+            value=40.0, step=0.5, format="%.1f",
+            key="vix_entry_max", disabled=not apply_vix_filter)
+    if not apply_vix_filter:
         vix_entry_min, vix_entry_max = 0.0, 9999.0
-    elif vix_entry_min >= vix_entry_max:
-        st.warning("Min Entry VIX must be less than Max Entry VIX.")
 
-    # ── Premium Filter ────────────────────────────────────────────────────────
     st.divider()
-    mp_col1, mp_col2 = st.columns([3, 1], gap="large")
-    with mp_col1:
-        no_min_premium = st.toggle(
-            "No premium filter — enter all trades",
-            value=False, key="no_min_premium",
-        )
-    with mp_col2:
-        if is_short:
-            min_premium = st.number_input(
-                "Minimum premium to receive  ($)",
-                min_value=0.0, max_value=10.0, value=0.15, step=0.01, format="%.2f",
-                key="min_premium_short", disabled=no_min_premium,
-                help="Skip if premium received is below this threshold",
-            )
-        else:
-            min_premium = st.number_input(
-                "Maximum premium to pay  ($)",
-                min_value=0.0, max_value=10.0, value=2.0, step=0.01, format="%.2f",
-                key="min_premium_long", disabled=no_min_premium,
-                help="Skip if premium paid exceeds this threshold",
-            )
-    if no_min_premium:
-        min_premium = 9999.0 if not is_short else 0.0
+    # Premium filter
+    apply_min_premium = st.toggle(
+        "Filter by premium  (only trade when premium meets the threshold below)",
+        value=True, key="apply_min_premium")
+    if is_short:
+        min_premium = st.number_input(
+            "Minimum premium to receive  ($)",
+            min_value=0.0, max_value=10.0, value=0.15, step=0.01, format="%.2f",
+            key="min_premium_short", disabled=not apply_min_premium)
+    else:
+        min_premium = st.number_input(
+            "Maximum premium to pay  ($)",
+            min_value=0.0, max_value=10.0, value=2.0, step=0.01, format="%.2f",
+            key="min_premium_long", disabled=not apply_min_premium)
+    if not apply_min_premium:
+        min_premium = 0.0 if is_short else 9999.0
 
-    # ── Run Simulation ────────────────────────────────────────────────────────
     st.divider()
+
+    # ── Simulation (runs only when form is submitted) ─────────────────────────
     st.subheader("Put Spread Premium Simulation")
 
     if vh is None:
         st.info("Download VIX historical data first.")
-    elif sim_start >= sim_end:
-        st.warning("Fix the date range first.")
+    elif run_sim and sim_start >= sim_end:
+        st.warning("Start date must be before end date.")
     else:
-        if st.button("Run Simulation", type="primary", use_container_width=False):
+        if run_sim:
             cutoff = sim_end - datetime.timedelta(days=int(min_days_to_expiry))
             mask   = (vh["Date"].dt.date >= sim_start) & (vh["Date"].dt.date <= cutoff)
             sim_df = vh[mask].copy().reset_index(drop=True)
@@ -568,20 +538,18 @@ with tab_spreads:
                 st.warning("No data in range after applying minimum DTE cutoff.")
             else:
                 # Build a fast date → closing VIX lookup for P&L at expiry
-                vix_lookup = {
-                    row["Date"].date(): float(row["CLOSE"])
-                    for _, row in vh.iterrows()
-                }
-                # Helper: nearest available VIX date on or after a given date
-                all_dates_sorted = sorted(vix_lookup.keys())
+                import bisect
+                _dates_arr  = [d.date() for d in vh["Date"]]
+                _closes_arr = vh["CLOSE"].tolist()
+                vix_lookup  = dict(zip(_dates_arr, _closes_arr))
 
+                # Binary search: nearest trading day on or after exp_date
                 def lookup_expiry_vix(exp_date):
                     if exp_date in vix_lookup:
                         return vix_lookup[exp_date]
-                    # Find next available trading day
-                    for d in all_dates_sorted:
-                        if d >= exp_date:
-                            return vix_lookup[d]
+                    idx = bisect.bisect_left(_dates_arr, exp_date)
+                    if idx < len(_dates_arr):
+                        return _closes_arr[idx]
                     return None
 
                 results_rows = []
@@ -654,7 +622,7 @@ with tab_spreads:
                         "P&L ($)":          pnl,
                     })
 
-                    if i % 200 == 0:
+                    if i % 500 == 0:
                         progress.progress(i / total, text=f"Computing… {i:,}/{total:,}")
 
                 progress.empty()
@@ -769,6 +737,48 @@ with tab_spreads:
                 margin=dict(l=40, r=40, t=30, b=40), height=420,
             )
             st.plotly_chart(fig_scatter, use_container_width=True)
+
+            # ── P&L distribution ──────────────────────────────────────────────
+            st.divider()
+            st.subheader("P&L Distribution")
+
+            _pnl = entered["P&L ($)"].dropna()
+            _gains  = _pnl[_pnl >= 0]
+            _losses = _pnl[_pnl <  0]
+
+            _bin_size = max(1.0, round((_pnl.max() - _pnl.min()) / 60 / 5) * 5)
+
+            fig_dist = go.Figure()
+            fig_dist.add_trace(go.Histogram(
+                x=_gains,
+                xbins=dict(size=_bin_size),
+                marker_color="#4caf7d",
+                name="Gains",
+                opacity=0.85,
+            ))
+            fig_dist.add_trace(go.Histogram(
+                x=_losses,
+                xbins=dict(size=_bin_size),
+                marker_color="#ff6b6b",
+                name="Losses",
+                opacity=0.85,
+            ))
+            fig_dist.add_vline(x=0, line_color="white", line_dash="dot", line_width=1.5)
+            fig_dist.update_layout(
+                barmode="overlay",
+                xaxis=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+                yaxis=dict(title="Number of trades"),
+                template="plotly_dark",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=40, r=40, t=30, b=40), height=380,
+            )
+            _pct_wins = 100 * len(_gains) / len(_pnl)
+            st.plotly_chart(fig_dist, use_container_width=True)
+            st.caption(
+                f"Gains: {len(_gains):,} trades ({_pct_wins:.1f}%)  ·  "
+                f"Losses: {len(_losses):,} trades ({100-_pct_wins:.1f}%)  ·  "
+                f"Bin size: ${_bin_size:,.0f}"
+            )
 
             # ── VIX bucket charts ────────────────────────────────────────────
             st.divider()
@@ -920,8 +930,11 @@ with tab_spreads:
                 "P&L ($)":        st.column_config.TextColumn(     "P&L ($)",   width=80),
             }
             TRADE_FMT = {
-                "Net Premium":  "{:.4f}",
-                "Expiry Value": "{:.4f}",
+                "F (model)":    "{:.3f}",
+                "Leg 1 Price":  "{:.3f}",
+                "Leg 2 Price":  "{:.3f}",
+                "Net Premium":  "{:.3f}",
+                "Expiry Value": "{:.3f}",
                 "P&L ($)":      lambda v: f"${v:,.2f}" if pd.notna(v) else "—",
             }
 
@@ -974,6 +987,16 @@ with tab_sandbox:
         )
 
     # ── Context Claude will know about ───────────────────────────────────────
+    _sim = st.session_state.sim_results
+    _sim_info = "None — no simulation has been run yet"
+    if _sim is not None:
+        _entered_sim = _sim[_sim["Trade Entered"]]
+        _sim_info = (
+            f"DataFrame with {len(_sim):,} rows, {len(_entered_sim):,} trades entered. "
+            f"Columns: {list(_sim.columns)}. "
+            f"Date range: {_sim['Date'].min()} to {_sim['Date'].max()}."
+        )
+
     _SYSTEM_PROMPT = f"""You are a data analyst assistant embedded in a VIX options strategy dashboard.
 You write concise Python/Streamlit code that will be executed with exec() in a sandbox.
 The following objects are already available (do NOT import or redefine them):
@@ -985,7 +1008,14 @@ The following objects are already available (do NOT import or redefine them):
   - next_wednesday(date, min_days) → date
   - V0={V0}, kappa={kappa}, theta_bar={theta_bar}, sigma={sigma:.4f}, r={r}  (current model params)
   - vix_history  (pandas DataFrame with columns: Date, OPEN, HIGH, LOW, CLOSE — full CBOE history, may be None)
+  - sim_results  (full simulation output — {_sim_info})
+  - sim_entered  (subset of sim_results where Trade Entered == True, ready to use directly)
   - today  (datetime.date)
+
+The sim_results / sim_entered columns are:
+  Date, Expiry (Wed), Days to Expiry, Spot VIX, Base σ, F (model),
+  Leg 1 σ, Leg 1 Price, Leg 2 σ, Leg 2 Price, Net Premium,
+  Trade Entered, Expiry VIX, Expiry Value, P&L ($)
 
 Rules:
 - Use st.plotly_chart(), st.dataframe(), st.metric(), st.write() etc. to display output.
@@ -1014,6 +1044,9 @@ Rules:
                     "V0": V0, "kappa": kappa, "theta_bar": theta_bar,
                     "sigma": sigma, "r": r,
                     "vix_history": st.session_state.vix_history,
+                    "sim_results": st.session_state.sim_results,
+                    "sim_entered": (st.session_state.sim_results[st.session_state.sim_results["Trade Entered"]].copy()
+                                    if st.session_state.sim_results is not None else None),
                     "today": today,
                 }
                 try:
@@ -1073,6 +1106,9 @@ Rules:
                         "V0": V0, "kappa": kappa, "theta_bar": theta_bar,
                         "sigma": sigma, "r": r,
                         "vix_history": st.session_state.vix_history,
+                        "sim_results": st.session_state.sim_results,
+                        "sim_entered": (st.session_state.sim_results[st.session_state.sim_results["Trade Entered"]].copy()
+                                        if st.session_state.sim_results is not None else None),
                         "today": today,
                     }
                     _stdout_cap = io.StringIO()
