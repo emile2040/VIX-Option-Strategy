@@ -4,10 +4,13 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import datetime
+import io
+import traceback
 import numpy as np
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import anthropic as _anthropic
 from pricing.futures import vix_futures_price, vix_futures_term_structure
 from pricing.options import black76
 from data.ibkr import fetch_vix_data
@@ -21,7 +24,7 @@ st.set_page_config(
 
 st.title("VIX Option Strategy Dashboard")
 
-tab_pricer, tab_spreads = st.tabs(["Futures & Options Pricer", "VIX Fixed Put Strikes"])
+tab_pricer, tab_spreads, tab_sandbox = st.tabs(["Futures & Options Pricer", "VIX Fixed Put Strikes", "🧪 Playing Around"])
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for key, val in [("live", None), ("vix_history", None), ("sim_results", None)]:
@@ -954,3 +957,142 @@ with tab_spreads:
                 full_df = entered.drop(columns=["VIX Bucket"], errors="ignore").sort_values("Date").reset_index(drop=True)
                 render_trade_table(full_df)
                 st.caption(sim_caption)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3: Playing Around (AI sandbox)
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_sandbox:
+    st.header("🧪 Playing Around")
+    st.caption("Describe what you'd like to explore and Claude will build it for you.")
+
+    # ── API key — reads from .streamlit/secrets.toml, falls back to text input ─
+    _api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not _api_key:
+        _api_key = st.text_input(
+            "Anthropic API key", type="password", key="anthropic_api_key",
+            help="Paste your key here, or save it permanently in .streamlit/secrets.toml",
+        )
+
+    # ── Context Claude will know about ───────────────────────────────────────
+    _SYSTEM_PROMPT = f"""You are a data analyst assistant embedded in a VIX options strategy dashboard.
+You write concise Python/Streamlit code that will be executed with exec() in a sandbox.
+The following objects are already available (do NOT import or redefine them):
+  - pd, np, go, st, datetime
+  - vix_futures_price(V0, kappa, theta_bar, sigma, r, tau) → float
+  - vix_futures_term_structure(V0, kappa, theta_bar, sigma, r, maturities) → list of dicts
+  - black76(F, K, r, sigma, T, option_type) → dict with price, delta, gamma, vega, theta, rho
+  - sigma_from_vix(vix) → float  (auto vol-of-vol)
+  - next_wednesday(date, min_days) → date
+  - V0={V0}, kappa={kappa}, theta_bar={theta_bar}, sigma={sigma:.4f}, r={r}  (current model params)
+  - vix_history  (pandas DataFrame with columns: Date, OPEN, HIGH, LOW, CLOSE — full CBOE history, may be None)
+  - today  (datetime.date)
+
+Rules:
+- Use st.plotly_chart(), st.dataframe(), st.metric(), st.write() etc. to display output.
+- Use plotly_dark template for all charts.
+- Do NOT use st.sidebar, st.tabs, or st.set_page_config.
+- Return ONLY the executable Python code block — no markdown fences, no explanation.
+- Keep it concise and readable."""
+
+    # ── Session state ─────────────────────────────────────────────────────────
+    for _k, _v in [("sandbox_history", []), ("sandbox_running", False)]:
+        if _k not in st.session_state:
+            st.session_state[_k] = _v
+
+    # ── Chat history display ──────────────────────────────────────────────────
+    for _msg in st.session_state.sandbox_history:
+        with st.chat_message(_msg["role"]):
+            if _msg["role"] == "assistant":
+                # Re-execute stored code so outputs re-render on page reload
+                _sandbox_ns = {
+                    "pd": pd, "np": np, "go": go, "st": st, "datetime": datetime,
+                    "vix_futures_price": vix_futures_price,
+                    "vix_futures_term_structure": vix_futures_term_structure,
+                    "black76": black76,
+                    "sigma_from_vix": sigma_from_vix,
+                    "next_wednesday": next_wednesday,
+                    "V0": V0, "kappa": kappa, "theta_bar": theta_bar,
+                    "sigma": sigma, "r": r,
+                    "vix_history": st.session_state.vix_history,
+                    "today": today,
+                }
+                try:
+                    exec(_msg["code"], _sandbox_ns)  # noqa: S102
+                except Exception as _e:
+                    st.error(f"Error re-rendering: {_e}")
+            else:
+                st.markdown(_msg["content"])
+
+    # ── Chat input ────────────────────────────────────────────────────────────
+    _prompt = st.chat_input("What would you like to explore?  e.g. 'Plot put delta vs VIX for K=18'")
+
+    if _prompt:
+        if not _api_key:
+            st.warning("Please enter your Anthropic API key above.")
+        else:
+            # Show user message
+            st.session_state.sandbox_history.append({"role": "user", "content": _prompt})
+            with st.chat_message("user"):
+                st.markdown(_prompt)
+
+            # Build messages for Claude
+            _messages = [
+                {"role": m["role"], "content": m["content"] if m["role"] == "user" else m["code"]}
+                for m in st.session_state.sandbox_history
+            ]
+
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking…"):
+                    try:
+                        _client = _anthropic.Anthropic(api_key=_api_key)
+                        _resp = _client.messages.create(
+                            model="claude-haiku-4-5",
+                            max_tokens=2048,
+                            system=_SYSTEM_PROMPT,
+                            messages=_messages,
+                        )
+                        _code = _resp.content[0].text.strip()
+                        # Strip markdown fences if Claude added them
+                        if _code.startswith("```"):
+                            _code = "\n".join(_code.split("\n")[1:])
+                        if _code.endswith("```"):
+                            _code = "\n".join(_code.split("\n")[:-1])
+                        _code = _code.strip()
+                    except Exception as _e:
+                        st.error(f"API error: {_e}")
+                        _code = None
+
+                if _code:
+                    _sandbox_ns = {
+                        "pd": pd, "np": np, "go": go, "st": st, "datetime": datetime,
+                        "vix_futures_price": vix_futures_price,
+                        "vix_futures_term_structure": vix_futures_term_structure,
+                        "black76": black76,
+                        "sigma_from_vix": sigma_from_vix,
+                        "next_wednesday": next_wednesday,
+                        "V0": V0, "kappa": kappa, "theta_bar": theta_bar,
+                        "sigma": sigma, "r": r,
+                        "vix_history": st.session_state.vix_history,
+                        "today": today,
+                    }
+                    _stdout_cap = io.StringIO()
+                    _old_out = sys.stdout
+                    sys.stdout = _stdout_cap
+                    try:
+                        exec(_code, _sandbox_ns)  # noqa: S102
+                        sys.stdout = _old_out
+                        _printed = _stdout_cap.getvalue()
+                        if _printed:
+                            st.text(_printed)
+                        st.session_state.sandbox_history.append(
+                            {"role": "assistant", "code": _code}
+                        )
+                    except Exception:
+                        sys.stdout = _old_out
+                        st.error(traceback.format_exc())
+
+    # Clear button
+    if st.session_state.sandbox_history:
+        if st.button("🗑 Clear conversation", key="sandbox_clear"):
+            st.session_state.sandbox_history = []
+            st.rerun()
