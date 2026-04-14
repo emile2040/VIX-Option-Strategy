@@ -21,7 +21,7 @@ st.set_page_config(
 
 st.title("VIX Option Strategy Dashboard")
 
-tab_pricer, tab_spreads = st.tabs(["Futures & Options Pricer", "Short Put Spreads on VIX"])
+tab_pricer, tab_spreads = st.tabs(["Futures & Options Pricer", "VIX Fixed Put Strikes"])
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for key, val in [("live", None), ("vix_history", None), ("sim_results", None)]:
@@ -257,6 +257,36 @@ with tab_pricer:
             st.markdown("**Regime Reference**")
             st.dataframe(REGIME_TABLE, hide_index=True, use_container_width=True)
 
+    # ── VIX Historical Data (download) ───────────────────────────────────────
+    st.divider()
+
+    VIX_CSV_URL   = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+    VIX_DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "VIX_History.csv")
+
+    if st.session_state.vix_history is None and os.path.exists(VIX_DATA_PATH):
+        st.session_state.vix_history = pd.read_csv(VIX_DATA_PATH, parse_dates=["Date"])
+
+    dl1, dl2 = st.columns([2, 3])
+    with dl1:
+        if st.button("Download and Import VIX Historical Data", use_container_width=True):
+            with st.spinner("Downloading from CBOE..."):
+                try:
+                    vix_hist = pd.read_csv(VIX_CSV_URL, parse_dates=["DATE"])
+                    vix_hist.columns = [c.strip().upper() for c in vix_hist.columns]
+                    vix_hist = vix_hist.rename(columns={"DATE": "Date"}).sort_values("Date").reset_index(drop=True)
+                    vix_hist.to_csv(VIX_DATA_PATH, index=False)
+                    st.session_state.vix_history = vix_hist
+                    st.success(f"Downloaded {len(vix_hist):,} rows  ({vix_hist['Date'].iloc[0].strftime('%d %b %Y')} → {vix_hist['Date'].iloc[-1].strftime('%d %b %Y')})")
+                except Exception as e:
+                    st.error(f"Download failed: {e}")
+    with dl2:
+        _loaded = st.session_state.vix_history
+        if _loaded is not None:
+            _dm1, _dm2, _dm3 = st.columns(3)
+            _dm1.metric("From",        _loaded["Date"].iloc[0].strftime("%d %b %Y"))
+            _dm2.metric("To",          _loaded["Date"].iloc[-1].strftime("%d %b %Y"))
+            _dm3.metric("Data points", f"{len(_loaded):,}")
+
     # ── VIX Historical Analysis ───────────────────────────────────────────────
     st.divider()
     st.header("VIX Historical Analysis")
@@ -367,21 +397,49 @@ with tab_pricer:
 # TAB 2: Short Put Spreads on VIX
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_spreads:
-    st.header("Short Put Spreads on VIX — Historical Simulation")
+    st.header("VIX Put Strategy — Historical Simulation")
+
+    # ── Strategy selector ─────────────────────────────────────────────────────
+    strategy = st.selectbox(
+        "Strategy",
+        ["Short Put Spread", "Long Put Spread", "Short Put", "Long Put"],
+        key="strategy",
+        help=(
+            "Short Put Spread: sell higher-K put, buy lower-K put as hedge  |  "
+            "Long Put Spread: buy higher-K put, sell lower-K put as hedge  |  "
+            "Short Put: sell a single put  |  "
+            "Long Put: buy a single put"
+        ),
+    )
+    is_spread = strategy in ["Short Put Spread", "Long Put Spread"]
+    is_short  = strategy in ["Short Put Spread", "Short Put"]
+
+    # Leg labels
+    LEG_LABELS = {
+        "Short Put Spread": ("Short Put  (sell)",          "Long Put  (buy — hedge)"),
+        "Long Put Spread":  ("Long Put  (buy)",            "Short Put  (sell — hedge)"),
+        "Short Put":        ("Put  (sell)",                None),
+        "Long Put":         ("Put  (buy)",                 None),
+    }
+    leg1_label, leg2_label = LEG_LABELS[strategy]
 
     # ── Strategy Parameters ───────────────────────────────────────────────────
     st.subheader("Strategy Parameters")
     sp1, sp2 = st.columns(2, gap="large")
     with sp1:
-        st.markdown("**Short Put**")
+        st.markdown(f"**{leg1_label}**")
         short_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=19.0,  step=0.5,  format="%.2f", key="short_strike")
         short_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=-0.05, step=0.05, format="%.2f", key="short_vol_shift",
-                                          help="Additive shift on σ for this leg  (e.g. −0.10 = σ − 10%)")
+                                          help="Additive shift on σ for this leg")
     with sp2:
-        st.markdown("**Long Put**")
-        long_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=15.0, step=0.5,  format="%.2f", key="long_strike")
-        long_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=0.05, step=0.05, format="%.2f", key="long_vol_shift",
-                                         help="Additive shift on σ for this leg  (e.g. +0.10 = σ + 10%)")
+        if is_spread:
+            st.markdown(f"**{leg2_label}**")
+            long_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=15.0,  step=0.5,  format="%.2f", key="long_strike")
+            long_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=0.05,  step=0.05, format="%.2f", key="long_vol_shift",
+                                             help="Additive shift on σ for this leg")
+        else:
+            long_strike    = None
+            long_vol_shift = 0.0
 
     st.divider()
     st.markdown("**Trade Execution**")
@@ -396,52 +454,26 @@ with tab_spreads:
         trading_cost = st.number_input(
             "Trading cost on premium  ($)",
             min_value=0.0, max_value=10.0, value=0.05, step=0.01, format="%.2f", key="trading_cost",
-            help="Subtracted from net premium received",
+            help="Added to premium paid (long) or subtracted from premium received (short)",
         )
     with tc3:
         n_contracts = st.number_input(
-            "Number of options to sell  (lot size 100)",
+            "Number of options  (lot size 100)",
             min_value=1, max_value=10000, value=1, step=1, key="n_contracts",
-            help="Number of put spreads sold per trade (each option = lot size 100)",
+            help="Number of options per trade (lot size = 100)",
         )
 
-    # ── VIX Historical Data ───────────────────────────────────────────────────
+    # ── VIX Historical Data (status) ──────────────────────────────────────────
     st.divider()
-    st.subheader("VIX Historical Data")
-
-    VIX_CSV_URL   = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
-    VIX_DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "VIX_History.csv")
-
-    # Auto-load from disk on first run
-    if st.session_state.vix_history is None and os.path.exists(VIX_DATA_PATH):
-        st.session_state.vix_history = pd.read_csv(VIX_DATA_PATH, parse_dates=["Date"])
-
-    col_dl1, col_dl2 = st.columns([2, 3])
-    with col_dl1:
-        if st.button("Download and Import VIX Historical Data", use_container_width=True):
-            with st.spinner("Downloading from CBOE..."):
-                try:
-                    vix_hist = pd.read_csv(VIX_CSV_URL, parse_dates=["DATE"])
-                    vix_hist.columns = [c.strip().upper() for c in vix_hist.columns]
-                    vix_hist = vix_hist.rename(columns={"DATE": "Date"}).sort_values("Date").reset_index(drop=True)
-                    vix_hist.to_csv(VIX_DATA_PATH, index=False)
-                    st.session_state.vix_history = vix_hist
-                    st.success(f"Downloaded {len(vix_hist):,} rows  ({vix_hist['Date'].iloc[0].strftime('%d %b %Y')} → {vix_hist['Date'].iloc[-1].strftime('%d %b %Y')})")
-                except Exception as e:
-                    st.error(f"Download failed: {e}")
-
-    with col_dl2:
-        vh = st.session_state.vix_history
-        if vh is not None:
-            m1, m2, m3 = st.columns(3)
-            m1.metric("From",         vh["Date"].iloc[0].strftime("%d %b %Y"))
-            m2.metric("To",           vh["Date"].iloc[-1].strftime("%d %b %Y"))
-            m3.metric("Data points",  f"{len(vh):,}")
-
-    if st.session_state.vix_history is not None:
-        with st.expander("Preview data", expanded=False):
-            vh = st.session_state.vix_history
-            st.dataframe(pd.concat([vh.head(5), vh.tail(5)]), use_container_width=True, hide_index=True)
+    vh = st.session_state.vix_history
+    if vh is not None:
+        st.caption(
+            f"VIX data loaded: {vh['Date'].iloc[0].strftime('%d %b %Y')} → "
+            f"{vh['Date'].iloc[-1].strftime('%d %b %Y')}  ·  {len(vh):,} rows  "
+            f"(download / refresh in the **Futures & Options Pricer** tab)"
+        )
+    else:
+        st.warning("No VIX data loaded — go to the **Futures & Options Pricer** tab to download it.")
 
     # ── Simulation Date Range ─────────────────────────────────────────────────
     st.divider()
@@ -489,23 +521,31 @@ with tab_spreads:
     elif vix_entry_min >= vix_entry_max:
         st.warning("Min Entry VIX must be less than Max Entry VIX.")
 
-    # ── Minimum Premium Filter ────────────────────────────────────────────────
+    # ── Premium Filter ────────────────────────────────────────────────────────
     st.divider()
     mp_col1, mp_col2 = st.columns([3, 1], gap="large")
     with mp_col1:
         no_min_premium = st.toggle(
-            "No minimum threshold — enter all trades",
+            "No premium filter — enter all trades",
             value=False, key="no_min_premium",
         )
     with mp_col2:
-        min_premium = st.number_input(
-            "Minimum spread premium to enter trade  ($)",
-            min_value=0.0, max_value=10.0, value=0.15, step=0.01, format="%.2f",
-            key="min_premium", disabled=no_min_premium,
-            help="Skip the trade if the floored spread premium is below this threshold",
-        )
+        if is_short:
+            min_premium = st.number_input(
+                "Minimum premium to receive  ($)",
+                min_value=0.0, max_value=10.0, value=0.15, step=0.01, format="%.2f",
+                key="min_premium_short", disabled=no_min_premium,
+                help="Skip if premium received is below this threshold",
+            )
+        else:
+            min_premium = st.number_input(
+                "Maximum premium to pay  ($)",
+                min_value=0.0, max_value=10.0, value=2.0, step=0.01, format="%.2f",
+                key="min_premium_long", disabled=no_min_premium,
+                help="Skip if premium paid exceeds this threshold",
+            )
     if no_min_premium:
-        min_premium = 0.0
+        min_premium = 9999.0 if not is_short else 0.0
 
     # ── Run Simulation ────────────────────────────────────────────────────────
     st.divider()
@@ -551,24 +591,44 @@ with tab_spreads:
                     expiry   = next_wednesday(date, int(min_days_to_expiry))
                     tau      = (expiry - date).days / 365.0
 
-                    base_sigma  = sigma_from_vix(spot_vix)
-                    sigma_short = max(base_sigma + short_vol_shift, 0.01)
-                    sigma_long  = max(base_sigma + long_vol_shift,  0.01)
+                    base_sigma = sigma_from_vix(spot_vix)
+                    sigma1     = max(base_sigma + short_vol_shift, 0.01)
+                    sigma2     = max(base_sigma + long_vol_shift,  0.01) if is_spread else None
 
-                    F          = vix_futures_price(spot_vix, kappa, theta_bar, base_sigma, r, tau)
-                    short_put  = black76(F, short_strike, r, sigma_short, tau, "put")["price"]
-                    long_put   = black76(F, long_strike,  r, sigma_long,  tau, "put")["price"]
+                    F      = vix_futures_price(spot_vix, kappa, theta_bar, base_sigma, r, tau)
+                    price1 = black76(F, short_strike, r, sigma1, tau, "put")["price"]
+                    price2 = (black76(F, long_strike, r, sigma2, tau, "put")["price"]
+                              if is_spread else None)
 
-                    spread_premium = max(short_put - long_put - trading_cost, 0.0)
-                    trade_entered  = (spread_premium >= min_premium
-                                      and vix_entry_min <= spot_vix <= vix_entry_max)
+                    # Net premium (received for short, paid for long)
+                    if strategy == "Short Put Spread":
+                        net_premium = max(price1 - price2 - trading_cost, 0.0)
+                    elif strategy == "Long Put Spread":
+                        net_premium = price1 - price2 + trading_cost
+                    elif strategy == "Short Put":
+                        net_premium = max(price1 - trading_cost, 0.0)
+                    else:  # Long Put
+                        net_premium = price1 + trading_cost
 
-                    # P&L at expiry (only for entered trades)
-                    expiry_vix   = lookup_expiry_vix(expiry) if trade_entered else None
+                    # Trade entry check
+                    in_vix_range = vix_entry_min <= spot_vix <= vix_entry_max
+                    if is_short:
+                        trade_entered = net_premium >= min_premium and in_vix_range
+                    else:
+                        trade_entered = net_premium <= min_premium and in_vix_range
+
+                    # P&L at expiry
+                    expiry_vix = lookup_expiry_vix(expiry) if trade_entered else None
                     if trade_entered and expiry_vix is not None:
-                        expiry_value = (max(short_strike - expiry_vix, 0.0)
-                                        - max(long_strike  - expiry_vix, 0.0))
-                        pnl = round(n_contracts * 100 * (spread_premium - expiry_value), 2)
+                        if is_spread:
+                            expiry_value = (max(short_strike - expiry_vix, 0.0)
+                                            - max(long_strike  - expiry_vix, 0.0))
+                        else:
+                            expiry_value = max(short_strike - expiry_vix, 0.0)
+                        if is_short:
+                            pnl = round(n_contracts * 100 * (net_premium - expiry_value), 2)
+                        else:
+                            pnl = round(n_contracts * 100 * (expiry_value - net_premium), 2)
                     else:
                         expiry_value = None
                         pnl          = None
@@ -580,11 +640,11 @@ with tab_spreads:
                         "Spot VIX":         round(spot_vix, 2),
                         "Base σ":           f"{base_sigma * 100:.1f}%",
                         "F (model)":        round(F, 4),
-                        "Short Put σ":      f"{sigma_short * 100:.1f}%",
-                        "Short Put Price":  round(short_put, 4),
-                        "Long Put σ":       f"{sigma_long * 100:.1f}%",
-                        "Long Put Price":   round(long_put, 4),
-                        "Spread Premium":   round(spread_premium, 4),
+                        "Leg 1 σ":          f"{sigma1 * 100:.1f}%",
+                        "Leg 1 Price":      round(price1, 4),
+                        "Leg 2 σ":          f"{sigma2 * 100:.1f}%" if sigma2 else None,
+                        "Leg 2 Price":      round(price2, 4) if price2 else None,
+                        "Net Premium":      round(net_premium, 4),
                         "Trade Entered":    trade_entered,
                         "Expiry VIX":       round(expiry_vix, 2)   if expiry_vix   is not None else None,
                         "Expiry Value":     round(expiry_value, 4)  if expiry_value is not None else None,
@@ -616,6 +676,11 @@ with tab_spreads:
                              ) if (pnl_vals < 0).any() else None
             sharpe      = (pnl_vals.mean() / pnl_vals.std() * np.sqrt(252)
                            ) if n_trades > 1 else None
+
+            if entered.empty:
+                st.warning("No trades were entered with the current filters. "
+                           "Try relaxing the premium threshold or VIX entry range.")
+                st.stop()
 
             # ── Summary statistics ────────────────────────────────────────────
             st.divider()
@@ -667,7 +732,7 @@ with tab_spreads:
             st.subheader("P&L vs Spread Premium")
 
             fig_scatter = go.Figure(go.Scatter(
-                x=entered["Spread Premium"],
+                x=entered["Net Premium"],
                 y=entered["P&L ($)"],
                 mode="markers",
                 marker=dict(
@@ -835,26 +900,26 @@ with tab_spreads:
                 return "color: #4caf7d" if val >= 0 else "color: #ff6b6b"
 
             TRADE_COL_CONFIG = {
-                "Date":             st.column_config.DateColumn(     "Date",      width=90),
-                "Expiry (Wed)":     st.column_config.DateColumn(     "Expiry",    width=90),
-                "Days to Expiry":   st.column_config.NumberColumn(   "DTE",       width=50),
-                "Spot VIX":         st.column_config.NumberColumn(   "VIX",       width=60),
-                "Base σ":           st.column_config.TextColumn(     "Base σ",    width=65),
-                "F (model)":        st.column_config.NumberColumn(   "F",         width=65),
-                "Short Put σ":      st.column_config.TextColumn(     "S σ",       width=60),
-                "Short Put Price":  st.column_config.NumberColumn(   "S Price",   width=70),
-                "Long Put σ":       st.column_config.TextColumn(     "L σ",       width=60),
-                "Long Put Price":   st.column_config.NumberColumn(   "L Price",   width=70),
-                "Spread Premium":   st.column_config.NumberColumn(   "Premium",   width=75),
-                "Trade Entered":    st.column_config.CheckboxColumn( "Trade?",    width=60),
-                "Expiry VIX":       st.column_config.NumberColumn(   "Exp VIX",   width=70),
-                "Expiry Value":     st.column_config.NumberColumn(   "Exp Value", width=80),
-                "P&L ($)":          st.column_config.TextColumn(     "P&L ($)",   width=80),
+                "Date":           st.column_config.DateColumn(     "Date",      width=90),
+                "Expiry (Wed)":   st.column_config.DateColumn(     "Expiry",    width=90),
+                "Days to Expiry": st.column_config.NumberColumn(   "DTE",       width=50),
+                "Spot VIX":       st.column_config.NumberColumn(   "VIX",       width=60),
+                "Base σ":         st.column_config.TextColumn(     "Base σ",    width=65),
+                "F (model)":      st.column_config.NumberColumn(   "F",         width=65),
+                "Leg 1 σ":        st.column_config.TextColumn(     "L1 σ",      width=60),
+                "Leg 1 Price":    st.column_config.NumberColumn(   "L1 Price",  width=70),
+                "Leg 2 σ":        st.column_config.TextColumn(     "L2 σ",      width=60),
+                "Leg 2 Price":    st.column_config.NumberColumn(   "L2 Price",  width=70),
+                "Net Premium":    st.column_config.NumberColumn(   "Premium",   width=75),
+                "Trade Entered":  st.column_config.CheckboxColumn( "Trade?",    width=60),
+                "Expiry VIX":     st.column_config.NumberColumn(   "Exp VIX",   width=70),
+                "Expiry Value":   st.column_config.NumberColumn(   "Exp Value", width=80),
+                "P&L ($)":        st.column_config.TextColumn(     "P&L ($)",   width=80),
             }
             TRADE_FMT = {
-                "Spread Premium": "{:.4f}",
-                "Expiry Value":   "{:.4f}",
-                "P&L ($)":        lambda v: f"${v:,.2f}" if pd.notna(v) else "—",
+                "Net Premium":  "{:.4f}",
+                "Expiry Value": "{:.4f}",
+                "P&L ($)":      lambda v: f"${v:,.2f}" if pd.notna(v) else "—",
             }
 
             def render_trade_table(df):
@@ -866,11 +931,10 @@ with tab_spreads:
 
             sim_caption = (
                 f"Min DTE = {min_days_to_expiry}d (next Wed)  ·  "
-                f"Short K={short_strike} (σ {short_vol_shift:+.2f})  ·  "
-                f"Long K={long_strike} (σ {long_vol_shift:+.2f})  ·  "
-                f"Cost ${trading_cost:.2f}  ·  Min premium ${min_premium:.2f}  ·  "
-                f"n={n_contracts}  ·  "
-                f"P&L = n × 100 × (Spread Premium − Expiry Value)"
+                f"Strategy: {strategy}  ·  "
+                f"Leg 1 K={short_strike} (σ {short_vol_shift:+.2f})"
+                + (f"  ·  Leg 2 K={long_strike} (σ {long_vol_shift:+.2f})" if is_spread else "")
+                + f"  ·  Cost ${trading_cost:.2f}  ·  n={n_contracts}"
             )
 
             # ── Spot check ───────────────────────────────────────────────────
