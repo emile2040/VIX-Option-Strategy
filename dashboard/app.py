@@ -51,6 +51,24 @@ def sigma_from_vix(v):
         if x0 <= v <= x1:
             return y0 + (y1 - y0) * (v - x0) / (x1 - x0)
 
+def build_vix_buckets(vix_min_val, vix_max_val):
+    """
+    Return (bins, labels) for pd.cut that robustly span [vix_min_val, vix_max_val].
+    Grid: width-1 up to 25, width-5 from 25–40, width-10 above 40.
+    Always anchors the first edge at vix_min_val and the last at vix_max_val.
+    """
+    # Full grid of edges across all regimes
+    _grid = sorted(set(
+        list(range(0, 26)) +          # width-1: 0–25
+        list(range(25, 45, 5)) +      # width-5: 25–40
+        list(range(40, 210, 10))      # width-10: 40+
+    ))
+    # Inner edges strictly between vix_min and vix_max
+    _inner = [e for e in _grid if vix_min_val < e < vix_max_val]
+    bins   = sorted(set([vix_min_val] + _inner + [vix_max_val]))
+    labels = [f"{bins[i]}–{bins[i+1]}" for i in range(len(bins) - 1)]
+    return bins, labels
+
 def next_wednesday(trade_date, min_days):
     """First Wednesday at least min_days calendar days after trade_date."""
     target     = trade_date + datetime.timedelta(days=int(min_days))
@@ -791,20 +809,8 @@ with tab_spreads:
             st.subheader("Analysis by Entry VIX Level")
 
             vix_min = int(np.floor(entered["Spot VIX"].min()))
-            vix_max = int(np.ceil(entered["Spot VIX"].max()))
-            # Width-1 up to 25, width-5 from 25–40, width-10 above 40
-            VIX_BINS   = list(range(vix_min, min(25, vix_max) + 1))
-            VIX_LABELS = [f"{v}–{v+1}" for v in range(vix_min, min(25, vix_max))]
-            if vix_max > 25:
-                mid_end = min(40, int(np.ceil(vix_max / 5) * 5))
-                for v in range(25, mid_end, 5):
-                    VIX_BINS.append(v + 5)
-                    VIX_LABELS.append(f"{v}–{v+5}")
-            if vix_max > 40:
-                coarse_end = int(np.ceil(vix_max / 10) * 10)
-                for v in range(40, coarse_end, 10):
-                    VIX_BINS.append(v + 10)
-                    VIX_LABELS.append(f"{v}–{v+10}")
+            vix_max = int(np.ceil( entered["Spot VIX"].max()))
+            VIX_BINS, VIX_LABELS = build_vix_buckets(vix_min, vix_max)
 
             entered["VIX Bucket"] = pd.cut(
                 entered["Spot VIX"], bins=VIX_BINS, labels=VIX_LABELS,
@@ -1357,17 +1363,8 @@ with tab_dynamic:
             st.divider()
             st.subheader("Analysis by Entry VIX Level")
             _d_vix_min = int(np.floor(_de["Spot VIX"].min()))
-            _d_vix_max = int(np.ceil(_de["Spot VIX"].max()))
-            _D_BINS   = list(range(_d_vix_min, min(25, _d_vix_max) + 1))
-            _D_LABELS = [f"{v}–{v+1}" for v in range(_d_vix_min, min(25, _d_vix_max))]
-            if _d_vix_max > 25:
-                _d_mid_end = min(40, int(np.ceil(_d_vix_max / 5) * 5))
-                for v in range(25, _d_mid_end, 5):
-                    _D_BINS.append(v + 5); _D_LABELS.append(f"{v}–{v+5}")
-            if _d_vix_max > 40:
-                _d_coarse_end = int(np.ceil(_d_vix_max / 10) * 10)
-                for v in range(40, _d_coarse_end, 10):
-                    _D_BINS.append(v + 10); _D_LABELS.append(f"{v}–{v+10}")
+            _d_vix_max = int(np.ceil( _de["Spot VIX"].max()))
+            _D_BINS, _D_LABELS = build_vix_buckets(_d_vix_min, _d_vix_max)
 
             _de["VIX Bucket"] = pd.cut(
                 _de["Spot VIX"], bins=_D_BINS, labels=_D_LABELS,
