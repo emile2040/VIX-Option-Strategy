@@ -5,6 +5,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import datetime
 import io
+import math
 import traceback
 import numpy as np
 import streamlit as st
@@ -24,10 +25,15 @@ st.set_page_config(
 
 st.title("VIX Option Strategy Dashboard")
 
-tab_pricer, tab_spreads, tab_sandbox = st.tabs(["Futures & Options Pricer", "VIX Fixed Put Strikes", "🧪 Playing Around"])
+tab_pricer, tab_spreads, tab_dynamic, tab_sandbox = st.tabs([
+    "Futures & Options Pricer",
+    "VIX Fixed Put Strikes",
+    "Dynamic Put Spreads Strikes",
+    "🧪 Playing Around",
+])
 
 # ── Session state ─────────────────────────────────────────────────────────────
-for key, val in [("live", None), ("vix_history", None), ("sim_results", None)]:
+for key, val in [("live", None), ("vix_history", None), ("sim_results", None), ("dyn_sim_results", None)]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -927,7 +933,7 @@ with tab_spreads:
                 "Trade Entered":  st.column_config.CheckboxColumn( "Trade?",    width=60),
                 "Expiry VIX":     st.column_config.NumberColumn(   "Exp VIX",   width=70),
                 "Expiry Value":   st.column_config.NumberColumn(   "Exp Value", width=80),
-                "P&L ($)":        st.column_config.TextColumn(     "P&L ($)",   width=80),
+                "P&L ($)":        st.column_config.NumberColumn(   "P&L ($)",   width=80, format="$%.2f"),
             }
             TRADE_FMT = {
                 "Spot VIX":     "{:.3f}",
@@ -937,7 +943,6 @@ with tab_spreads:
                 "Net Premium":  "{:.3f}",
                 "Expiry VIX":   "{:.3f}",
                 "Expiry Value": "{:.3f}",
-                "P&L ($)":      lambda v: f"${v:,.2f}" if pd.notna(v) else "—",
             }
 
             def render_trade_table(df):
@@ -972,6 +977,564 @@ with tab_spreads:
                 full_df = entered.drop(columns=["VIX Bucket"], errors="ignore").sort_values("Date").reset_index(drop=True)
                 render_trade_table(full_df)
                 st.caption(sim_caption)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3: Dynamic Put Spreads Strikes
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_dynamic:
+    st.header("Dynamic Put Spreads Strikes — Historical Simulation")
+    st.caption(
+        "Short Put Spread where the strikes are chosen automatically each day "
+        "based on the VIX entry level."
+    )
+
+    # ── VIX data status ───────────────────────────────────────────────────────
+    _dvh = st.session_state.vix_history
+    _d_data_start = _dvh["Date"].iloc[0].date()  if _dvh is not None else datetime.date(1990, 1, 2)
+    _d_data_end   = _dvh["Date"].iloc[-1].date() if _dvh is not None else today
+    if _dvh is not None:
+        st.caption(
+            f"VIX data loaded: {_dvh['Date'].iloc[0].strftime('%d %b %Y')} → "
+            f"{_dvh['Date'].iloc[-1].strftime('%d %b %Y')}  ·  {len(_dvh):,} rows  "
+            f"(download / refresh in the **Futures & Options Pricer** tab)"
+        )
+    else:
+        st.warning("No VIX data loaded — go to the **Futures & Options Pricer** tab to download it.")
+
+    # ── Inputs (form) ─────────────────────────────────────────────────────────
+    with st.form("dyn_sim_form"):
+        st.subheader("Strike Selection")
+        dk1, dk2, dk3 = st.columns(3, gap="large")
+        with dk1:
+            dyn_higher_dist = st.select_slider(
+                "Higher strike distance from VIX",
+                options=list(range(-10, 0)) + list(range(1, 11)),
+                value=-1,
+                key="dyn_higher_dist",
+                help=(
+                    "−1 = nearest integer strictly below VIX entry level  |  "
+                    "+1 = nearest integer strictly above VIX entry level  |  "
+                    "−2 / +2 = next one further down / up, etc."
+                ),
+            )
+        with dk2:
+            dyn_spread_distance = st.number_input(
+                "Distance between strikes  (higher − lower)",
+                min_value=1, max_value=50, value=4, step=1,
+                key="dyn_spread_distance",
+                help="Lower strike = higher strike − this value",
+            )
+        with dk3:
+            st.markdown("&nbsp;")   # spacer
+            st.markdown(
+                "_Example: VIX = 18.4, distance = −1, width = 4  →  "
+                "higher strike = **18**, lower strike = **14**_"
+            )
+
+        st.divider()
+        st.subheader("Volatility Shifts")
+        dv1, dv2 = st.columns(2, gap="large")
+        with dv1:
+            st.markdown("**Short Put  (sell — higher strike)**")
+            dyn_short_vol_shift = st.number_input(
+                "Volatility Shift", min_value=-2.0, max_value=2.0,
+                value=-0.05, step=0.05, format="%.2f", key="dyn_short_vol_shift")
+        with dv2:
+            st.markdown("**Long Put  (buy — lower strike / hedge)**")
+            dyn_long_vol_shift = st.number_input(
+                "Volatility Shift", min_value=-2.0, max_value=2.0,
+                value=0.05, step=0.05, format="%.2f", key="dyn_long_vol_shift")
+
+        st.divider()
+        st.markdown("**Trade Execution**")
+        dtc1, dtc2, dtc3 = st.columns(3, gap="large")
+        with dtc1:
+            dyn_min_dte = st.number_input(
+                "Minimum calendar days before a Wednesday expiry",
+                min_value=1, max_value=60, value=10, step=1, key="dyn_min_dte")
+        with dtc2:
+            dyn_trading_cost = st.number_input(
+                "Trading cost on premium  ($)",
+                min_value=0.0, max_value=10.0, value=0.05, step=0.01,
+                format="%.2f", key="dyn_trading_cost")
+        with dtc3:
+            dyn_n_contracts = st.number_input(
+                "Number of options  (lot size 100)",
+                min_value=1, max_value=10000, value=1, step=1, key="dyn_n_contracts")
+
+        st.divider()
+        st.subheader("Simulation Date Range")
+        ddr1, ddr2 = st.columns(2, gap="large")
+        with ddr1:
+            dyn_sim_start = st.date_input(
+                "Start date", value=_d_data_start,
+                min_value=_d_data_start, max_value=_d_data_end, key="dyn_sim_start")
+        with ddr2:
+            dyn_sim_end = st.date_input(
+                "End date", value=_d_data_end,
+                min_value=_d_data_start, max_value=_d_data_end, key="dyn_sim_end")
+
+        st.divider()
+        dyn_run_sim = st.form_submit_button("▶ Run Simulation", type="primary")
+
+    # ── Filters (outside form — toggle flips immediately grey/ungrey inputs) ──
+    st.divider()
+    # VIX entry range filter
+    dyn_apply_vix_filter = st.toggle(
+        "Filter by VIX entry level  (only trade when VIX is within the range below)",
+        value=True, key="dyn_apply_vix_filter")
+    _dyn_vf1, _dyn_vf2 = st.columns(2, gap="large")
+    with _dyn_vf1:
+        dyn_vix_entry_min = st.number_input(
+            "Min Entry VIX", min_value=0.0, max_value=200.0,
+            value=10.0, step=0.5, format="%.1f",
+            key="dyn_vix_entry_min", disabled=not dyn_apply_vix_filter)
+    with _dyn_vf2:
+        dyn_vix_entry_max = st.number_input(
+            "Max Entry VIX", min_value=0.0, max_value=200.0,
+            value=40.0, step=0.5, format="%.1f",
+            key="dyn_vix_entry_max", disabled=not dyn_apply_vix_filter)
+    if not dyn_apply_vix_filter:
+        dyn_vix_entry_min, dyn_vix_entry_max = 0.0, 9999.0
+
+    st.divider()
+    # Premium filter
+    dyn_apply_premium = st.toggle(
+        "Filter by premium  (only trade when premium meets the threshold below)",
+        value=True, key="dyn_apply_premium")
+    dyn_min_premium = st.number_input(
+        "Minimum premium to receive  ($)",
+        min_value=0.0, max_value=10.0, value=0.15, step=0.01, format="%.2f",
+        key="dyn_min_premium", disabled=not dyn_apply_premium)
+    if not dyn_apply_premium:
+        dyn_min_premium = 0.0
+
+    st.divider()
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+    st.subheader("Dynamic Put Spread Simulation")
+
+    if _dvh is None:
+        st.info("Download VIX historical data first.")
+    elif dyn_run_sim and dyn_sim_start >= dyn_sim_end:
+        st.warning("Start date must be before end date.")
+    else:
+        if dyn_run_sim:
+            import bisect as _bisect
+
+            _d_cutoff = dyn_sim_end - datetime.timedelta(days=int(dyn_min_dte))
+            _d_mask   = (
+                (_dvh["Date"].dt.date >= dyn_sim_start) &
+                (_dvh["Date"].dt.date <= _d_cutoff)
+            )
+            _d_sim_df = _dvh[_d_mask].copy().reset_index(drop=True)
+
+            if _d_sim_df.empty:
+                st.warning("No data in range after applying minimum DTE cutoff.")
+            else:
+                # Fast expiry-VIX lookup
+                _d_dates_arr  = [d.date() for d in _dvh["Date"]]
+                _d_closes_arr = _dvh["CLOSE"].tolist()
+                _d_vix_lookup = dict(zip(_d_dates_arr, _d_closes_arr))
+
+                def _dyn_lookup_expiry_vix(exp_date):
+                    if exp_date in _d_vix_lookup:
+                        return _d_vix_lookup[exp_date]
+                    idx = _bisect.bisect_left(_d_dates_arr, exp_date)
+                    if idx < len(_d_dates_arr):
+                        return _d_closes_arr[idx]
+                    return None
+
+                def _dyn_higher_strike(spot_vix, dist):
+                    """
+                    dist < 0 → nearest integer strictly below spot_vix, then go dist steps further down.
+                    dist > 0 → nearest integer strictly above spot_vix, then go dist steps further up.
+                    """
+                    if dist < 0:
+                        return float(math.ceil(spot_vix) + dist)   # ceil - |dist|
+                    else:
+                        return float(math.floor(spot_vix) + dist)  # floor + dist
+
+                _d_rows = []
+                _d_progress = st.progress(0, text="Computing…")
+                _d_total = len(_d_sim_df)
+
+                for _d_i, (_, _d_row) in enumerate(_d_sim_df.iterrows()):
+                    _d_date     = _d_row["Date"].date()
+                    _d_spot_vix = float(_d_row["CLOSE"])
+                    _d_expiry   = next_wednesday(_d_date, int(dyn_min_dte))
+                    _d_tau      = (_d_expiry - _d_date).days / 365.0
+
+                    _d_base_sigma = sigma_from_vix(_d_spot_vix)
+                    _d_sigma1     = max(_d_base_sigma + dyn_short_vol_shift, 0.01)
+                    _d_sigma2     = max(_d_base_sigma + dyn_long_vol_shift,  0.01)
+
+                    _d_F = vix_futures_price(_d_spot_vix, kappa, theta_bar, _d_base_sigma, r, _d_tau)
+
+                    _d_k_high = _dyn_higher_strike(_d_spot_vix, dyn_higher_dist)
+                    _d_k_low  = max(_d_k_high - dyn_spread_distance, 1.0)
+
+                    _d_price1 = black76(_d_F, _d_k_high, r, _d_sigma1, _d_tau, "put")["price"]
+                    _d_price2 = black76(_d_F, _d_k_low,  r, _d_sigma2, _d_tau, "put")["price"]
+
+                    _d_net_premium = max(_d_price1 - _d_price2 - dyn_trading_cost, 0.0)
+
+                    _d_in_vix_range  = dyn_vix_entry_min <= _d_spot_vix <= dyn_vix_entry_max
+                    _d_trade_entered = _d_net_premium >= dyn_min_premium and _d_in_vix_range
+
+                    _d_expiry_vix   = _dyn_lookup_expiry_vix(_d_expiry) if _d_trade_entered else None
+                    if _d_trade_entered and _d_expiry_vix is not None:
+                        _d_expiry_value = (max(_d_k_high - _d_expiry_vix, 0.0)
+                                           - max(_d_k_low  - _d_expiry_vix, 0.0))
+                        _d_pnl = round(dyn_n_contracts * 100 * (_d_net_premium - _d_expiry_value), 2)
+                    else:
+                        _d_expiry_value = None
+                        _d_pnl          = None
+
+                    _d_rows.append({
+                        "Date":             _d_date,
+                        "Expiry (Wed)":     _d_expiry,
+                        "Days to Expiry":   (_d_expiry - _d_date).days,
+                        "Spot VIX":         round(_d_spot_vix, 2),
+                        "Higher Strike":    _d_k_high,
+                        "Lower Strike":     _d_k_low,
+                        "Base σ":           f"{_d_base_sigma * 100:.1f}%",
+                        "F (model)":        round(_d_F, 4),
+                        "Leg 1 σ":          f"{_d_sigma1 * 100:.1f}%",
+                        "Leg 1 Price":      round(_d_price1, 4),
+                        "Leg 2 σ":          f"{_d_sigma2 * 100:.1f}%",
+                        "Leg 2 Price":      round(_d_price2, 4),
+                        "Net Premium":      round(_d_net_premium, 4),
+                        "Trade Entered":    _d_trade_entered,
+                        "Expiry VIX":       round(_d_expiry_vix, 2)    if _d_expiry_vix    is not None else None,
+                        "Expiry Value":     round(_d_expiry_value, 4)   if _d_expiry_value  is not None else None,
+                        "P&L ($)":          _d_pnl,
+                    })
+
+                    if _d_i % 500 == 0:
+                        _d_progress.progress(_d_i / _d_total, text=f"Computing… {_d_i:,}/{_d_total:,}")
+
+                _d_progress.empty()
+                st.session_state.dyn_sim_results = pd.DataFrame(_d_rows)
+
+        # ── Display results ───────────────────────────────────────────────────
+        if st.session_state.dyn_sim_results is not None:
+            _dr = st.session_state.dyn_sim_results
+            _de = _dr[_dr["Trade Entered"]].copy()
+            _dpnl_vals = _de["P&L ($)"].dropna()
+            _dn_trades = len(_dpnl_vals)
+
+            _d_total_pnl    = _dpnl_vals.sum()
+            _d_avg_pnl      = _dpnl_vals.mean()              if _dn_trades else None
+            _d_win_rate     = (_dpnl_vals > 0).mean() * 100  if _dn_trades else None
+            _d_max_win      = _dpnl_vals.max()                if _dn_trades else None
+            _d_max_loss     = _dpnl_vals.min()                if _dn_trades else None
+            _d_avg_win      = _dpnl_vals[_dpnl_vals > 0].mean() if (_dpnl_vals > 0).any() else None
+            _d_avg_loss     = _dpnl_vals[_dpnl_vals < 0].mean() if (_dpnl_vals < 0).any() else None
+            _d_profit_factor = (
+                _dpnl_vals[_dpnl_vals > 0].sum() / abs(_dpnl_vals[_dpnl_vals < 0].sum())
+                if (_dpnl_vals < 0).any() else None
+            )
+            _d_sharpe = (
+                _dpnl_vals.mean() / _dpnl_vals.std() * np.sqrt(252)
+                if _dn_trades > 1 else None
+            )
+
+            if _de.empty:
+                st.warning("No trades were entered. Try relaxing the premium threshold.")
+                st.stop()
+
+            # ── Statistics ───────────────────────────────────────────────────
+            st.divider()
+            st.subheader("Strategy Statistics")
+            _dr1 = st.columns(4)
+            _dr1[0].metric("Total P&L",      f"${_d_total_pnl:,.0f}")
+            _dr1[1].metric("Trades entered", f"{_dn_trades:,}")
+            _dr1[2].metric("Win rate",        f"{_d_win_rate:.1f}%" if _d_win_rate is not None else "—")
+            _dr1[3].metric("Avg P&L / trade", f"${_d_avg_pnl:,.0f}"  if _d_avg_pnl  is not None else "—")
+            _dr2 = st.columns(4)
+            _dr2[0].metric("Max win",  f"${_d_max_win:,.0f}"  if _d_max_win  is not None else "—")
+            _dr2[1].metric("Max loss", f"${_d_max_loss:,.0f}" if _d_max_loss is not None else "—")
+            _dr2[2].metric("Avg win / Avg loss",
+                           f"{abs(_d_avg_win/_d_avg_loss):.2f}x"
+                           if _d_avg_win is not None and _d_avg_loss is not None else "—")
+            _dr2[3].metric("Profit factor", f"{_d_profit_factor:.2f}" if _d_profit_factor is not None else "∞")
+
+            # ── Annual P&L ────────────────────────────────────────────────────
+            st.divider()
+            st.subheader("Annual P&L")
+            _de["Year"] = pd.to_datetime(_de["Date"]).dt.year
+            _d_annual = _de.groupby("Year")["P&L ($)"].sum().reset_index()
+            _d_annual.columns = ["Year", "P&L ($)"]
+            _d_fig_annual = go.Figure(go.Bar(
+                x=_d_annual["Year"].astype(str),
+                y=_d_annual["P&L ($)"],
+                marker_color=["#4caf7d" if v >= 0 else "#ff6b6b" for v in _d_annual["P&L ($)"]],
+                text=[f"${v:,.0f}" for v in _d_annual["P&L ($)"]],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            _d_fig_annual.add_hline(y=0, line_color="white", line_width=1)
+            _d_fig_annual.update_layout(
+                xaxis_title="Year", yaxis_title="P&L ($)",
+                template="plotly_dark",
+                margin=dict(l=40, r=40, t=30, b=40), height=380,
+                showlegend=False,
+                yaxis=dict(tickprefix="$", tickformat=",.0f"),
+            )
+            st.plotly_chart(_d_fig_annual, use_container_width=True)
+
+            # ── P&L vs Premium scatter ────────────────────────────────────────
+            st.divider()
+            st.subheader("P&L vs Spread Premium")
+            _d_fig_scatter = go.Figure(go.Scatter(
+                x=_de["Net Premium"],
+                y=_de["P&L ($)"],
+                mode="markers",
+                marker=dict(
+                    color=_de["P&L ($)"],
+                    colorscale=[[0, "#ff6b6b"], [0.5, "#888888"], [1, "#4caf7d"]],
+                    cmin=_de["P&L ($)"].min(), cmid=0, cmax=_de["P&L ($)"].max(),
+                    size=5, opacity=0.6,
+                    colorbar=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+                ),
+                customdata=np.stack([
+                    _de["Date"].astype(str),
+                    _de["Spot VIX"],
+                    _de["Higher Strike"],
+                    _de["Lower Strike"],
+                    _de["Expiry VIX"].fillna(0),
+                ], axis=1),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Premium: $%{x:.3f}<br>"
+                    "P&L: $%{y:,.2f}<br>"
+                    "Entry VIX: %{customdata[1]:.2f}<br>"
+                    "Strikes: %{customdata[2]:.0f} / %{customdata[3]:.0f}<br>"
+                    "Expiry VIX: %{customdata[4]:.2f}<extra></extra>"
+                ),
+            ))
+            _d_fig_scatter.add_hline(y=0, line_color="white", line_dash="dot", line_width=1)
+            _d_fig_scatter.update_layout(
+                xaxis=dict(title="Spread Premium ($)", tickprefix="$"),
+                yaxis=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+                template="plotly_dark",
+                margin=dict(l=40, r=40, t=30, b=40), height=420,
+            )
+            st.plotly_chart(_d_fig_scatter, use_container_width=True)
+
+            # ── P&L Distribution ──────────────────────────────────────────────
+            st.divider()
+            st.subheader("P&L Distribution")
+            _d_pnl_s  = _de["P&L ($)"].dropna()
+            _d_gains  = _d_pnl_s[_d_pnl_s >= 0]
+            _d_losses = _d_pnl_s[_d_pnl_s <  0]
+            _d_bin_sz = max(1.0, round((_d_pnl_s.max() - _d_pnl_s.min()) / 60 / 5) * 5)
+            _d_fig_dist = go.Figure()
+            _d_fig_dist.add_trace(go.Histogram(
+                x=_d_gains,  xbins=dict(size=_d_bin_sz),
+                marker_color="#4caf7d", name="Gains",  opacity=0.85))
+            _d_fig_dist.add_trace(go.Histogram(
+                x=_d_losses, xbins=dict(size=_d_bin_sz),
+                marker_color="#ff6b6b", name="Losses", opacity=0.85))
+            _d_fig_dist.add_vline(x=0, line_color="white", line_dash="dot", line_width=1.5)
+            _d_fig_dist.update_layout(
+                barmode="overlay",
+                xaxis=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+                yaxis=dict(title="Number of trades"),
+                template="plotly_dark",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=40, r=40, t=30, b=40), height=380,
+            )
+            _d_pct_wins = 100 * len(_d_gains) / len(_d_pnl_s)
+            st.plotly_chart(_d_fig_dist, use_container_width=True)
+            st.caption(
+                f"Gains: {len(_d_gains):,} ({_d_pct_wins:.1f}%)  ·  "
+                f"Losses: {len(_d_losses):,} ({100-_d_pct_wins:.1f}%)  ·  "
+                f"Bin size: ${_d_bin_sz:,.0f}"
+            )
+
+            # ── Analysis by Entry VIX level ───────────────────────────────────
+            st.divider()
+            st.subheader("Analysis by Entry VIX Level")
+            _d_vix_min = int(np.floor(_de["Spot VIX"].min()))
+            _d_vix_max = int(np.ceil(_de["Spot VIX"].max()))
+            _D_BINS   = list(range(_d_vix_min, min(25, _d_vix_max) + 1))
+            _D_LABELS = [f"{v}–{v+1}" for v in range(_d_vix_min, min(25, _d_vix_max))]
+            if _d_vix_max > 25:
+                _d_mid_end = min(40, int(np.ceil(_d_vix_max / 5) * 5))
+                for v in range(25, _d_mid_end, 5):
+                    _D_BINS.append(v + 5); _D_LABELS.append(f"{v}–{v+5}")
+            if _d_vix_max > 40:
+                _d_coarse_end = int(np.ceil(_d_vix_max / 10) * 10)
+                for v in range(40, _d_coarse_end, 10):
+                    _D_BINS.append(v + 10); _D_LABELS.append(f"{v}–{v+10}")
+
+            _de["VIX Bucket"] = pd.cut(
+                _de["Spot VIX"], bins=_D_BINS, labels=_D_LABELS,
+                right=False, include_lowest=True)
+            _d_bstats = (
+                _de.groupby("VIX Bucket", observed=True)["P&L ($)"]
+                .agg(
+                    count="count",
+                    win_rate=lambda x: (x > 0).mean() * 100,
+                    avg_pnl="mean",
+                    avg_win=lambda x: x[x > 0].mean() if (x > 0).any() else np.nan,
+                    avg_loss=lambda x: x[x < 0].mean() if (x < 0).any() else np.nan,
+                    n_wins=lambda x: (x > 0).sum(),
+                    n_losses=lambda x: (x < 0).sum(),
+                )
+                .reset_index()
+            )
+            _d_bstats = _d_bstats[_d_bstats["count"] > 0]
+            _d_bx = _d_bstats["VIX Bucket"].astype(str)
+
+            _d_fig_wr = go.Figure(go.Bar(
+                x=_d_bx, y=_d_bstats["win_rate"],
+                marker_color=["#4caf7d" if v >= 50 else "#ff6b6b" for v in _d_bstats["win_rate"]],
+                text=[f"{v:.1f}%<br><sub>{int(c)}</sub>" for v, c in zip(_d_bstats["win_rate"], _d_bstats["count"])],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            _d_fig_wr.add_hline(y=50, line_dash="dash", line_color="white", line_width=1,
+                                annotation_text="50%", annotation_position="right")
+            _d_fig_wr.update_layout(
+                title="Win Rate % by Entry VIX", xaxis_title="Entry VIX range",
+                yaxis=dict(title="Win rate (%)", range=[0, 115], ticksuffix="%"),
+                template="plotly_dark", margin=dict(l=40, r=40, t=50, b=40),
+                height=370, showlegend=False,
+            )
+            st.plotly_chart(_d_fig_wr, use_container_width=True)
+
+            _d_fig_ap = go.Figure(go.Bar(
+                x=_d_bx, y=_d_bstats["avg_pnl"],
+                marker_color=["#4caf7d" if v >= 0 else "#ff6b6b" for v in _d_bstats["avg_pnl"]],
+                text=[f"${v:,.0f}<br><sub>{int(c)}</sub>" for v, c in zip(_d_bstats["avg_pnl"], _d_bstats["count"])],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            _d_fig_ap.add_hline(y=0, line_color="white", line_width=1)
+            _d_fig_ap.update_layout(
+                title="Average Trade P&L by Entry VIX", xaxis_title="Entry VIX range",
+                yaxis=dict(title="Avg P&L ($)", tickprefix="$", tickformat=",.0f"),
+                template="plotly_dark", margin=dict(l=40, r=40, t=50, b=40),
+                height=370, showlegend=False,
+            )
+            st.plotly_chart(_d_fig_ap, use_container_width=True)
+
+            _d_fig_wl = go.Figure()
+            _d_fig_wl.add_trace(go.Bar(
+                name="Wins",   x=_d_bx, y=_d_bstats["n_wins"],
+                marker_color="#4caf7d",
+                text=_d_bstats["n_wins"].astype(int),
+                textposition="outside", textfont=dict(size=11),
+            ))
+            _d_fig_wl.add_trace(go.Bar(
+                name="Losses", x=_d_bx, y=_d_bstats["n_losses"],
+                marker_color="#ff6b6b",
+                text=_d_bstats["n_losses"].astype(int),
+                textposition="outside", textfont=dict(size=11),
+            ))
+            _d_fig_wl.update_layout(
+                title="Number of Wins vs Losses by Entry VIX", xaxis_title="Entry VIX range",
+                yaxis_title="Number of trades", barmode="group",
+                template="plotly_dark", margin=dict(l=40, r=40, t=50, b=40),
+                height=370, legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            )
+            st.plotly_chart(_d_fig_wl, use_container_width=True)
+
+            _d_fig_wlp = go.Figure()
+            _d_fig_wlp.add_trace(go.Bar(
+                name="Avg Win",  x=_d_bx, y=_d_bstats["avg_win"],
+                marker_color="#4caf7d",
+                text=[f"${v:,.0f}" if pd.notna(v) else "" for v in _d_bstats["avg_win"]],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            _d_fig_wlp.add_trace(go.Bar(
+                name="Avg Loss", x=_d_bx, y=_d_bstats["avg_loss"],
+                marker_color="#ff6b6b",
+                text=[f"${v:,.0f}" if pd.notna(v) else "" for v in _d_bstats["avg_loss"]],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            _d_fig_wlp.add_hline(y=0, line_color="white", line_width=1)
+            _d_fig_wlp.update_layout(
+                title="Average Win P&L vs Average Loss P&L by Entry VIX", xaxis_title="Entry VIX range",
+                yaxis=dict(title="Avg P&L ($)", tickprefix="$", tickformat=",.0f"),
+                barmode="group", template="plotly_dark",
+                margin=dict(l=40, r=40, t=50, b=40), height=370,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            )
+            st.plotly_chart(_d_fig_wlp, use_container_width=True)
+
+            _d_count_cap = "  ·  ".join(
+                f"{row['VIX Bucket']}: {int(row['count'])}" for _, row in _d_bstats.iterrows()
+            )
+            st.caption(f"Trades per VIX bucket  —  {_d_count_cap}")
+
+            # ── Trade tables ─────────────────────────────────────────────────
+            def _d_colour_pnl(val):
+                if not isinstance(val, (int, float)) or pd.isna(val):
+                    return ""
+                return "color: #4caf7d" if val >= 0 else "color: #ff6b6b"
+
+            _D_COL_CFG = {
+                "Date":           st.column_config.DateColumn(     "Date",      width=80),
+                "Expiry (Wed)":   st.column_config.DateColumn(     "Expiry",    width=80),
+                "Days to Expiry": st.column_config.NumberColumn(   "DTE",       width=40),
+                "Spot VIX":       st.column_config.NumberColumn(   "VIX",       width=55),
+                "Higher Strike":  st.column_config.NumberColumn(   "K↑",        width=45),
+                "Lower Strike":   st.column_config.NumberColumn(   "K↓",        width=45),
+                "Base σ":         st.column_config.TextColumn(     "Bσ",        width=50),
+                "F (model)":      st.column_config.NumberColumn(   "F",         width=55),
+                "Leg 1 σ":        st.column_config.TextColumn(     "L1σ",       width=50),
+                "Leg 1 Price":    st.column_config.NumberColumn(   "L1 $",      width=60),
+                "Leg 2 σ":        st.column_config.TextColumn(     "L2σ",       width=50),
+                "Leg 2 Price":    st.column_config.NumberColumn(   "L2 $",      width=60),
+                "Net Premium":    st.column_config.NumberColumn(   "Prem",      width=60),
+                "Trade Entered":  st.column_config.CheckboxColumn( "In?",       width=40),
+                "Expiry VIX":     st.column_config.NumberColumn(   "Exp VIX",   width=60),
+                "Expiry Value":   st.column_config.NumberColumn(   "Exp Val",   width=60),
+                "P&L ($)":        st.column_config.NumberColumn(   "P&L",       width=70, format="$%.2f"),
+            }
+            _D_FMT = {
+                "Spot VIX":     "{:.3f}",
+                "Higher Strike":"{:.0f}",
+                "Lower Strike": "{:.0f}",
+                "F (model)":    "{:.3f}",
+                "Leg 1 Price":  "{:.3f}",
+                "Leg 2 Price":  "{:.3f}",
+                "Net Premium":  "{:.3f}",
+                "Expiry VIX":   "{:.3f}",
+                "Expiry Value": "{:.3f}",
+            }
+
+            def _d_render_table(df):
+                st.dataframe(
+                    df.style.format(_D_FMT, na_rep="—").map(_d_colour_pnl, subset=["P&L ($)"]),
+                    use_container_width=True, hide_index=True,
+                    column_config=_D_COL_CFG,
+                )
+
+            _d_sim_caption = (
+                f"Min DTE = {dyn_min_dte}d  ·  "
+                f"Higher strike dist = {dyn_higher_dist:+d}  ·  "
+                f"Spread width = {dyn_spread_distance}  ·  "
+                f"Short σ {dyn_short_vol_shift:+.2f}  ·  Long σ {dyn_long_vol_shift:+.2f}  ·  "
+                f"Cost ${dyn_trading_cost:.2f}  ·  n={dyn_n_contracts}"
+            )
+
+            st.divider()
+            st.markdown("**Spot check — 5 random example dates**")
+            _d_sample = min(5, len(_dr))
+            _d_ex_df  = _dr.sample(n=_d_sample).sort_values("Date").reset_index(drop=True)
+            _d_render_table(_d_ex_df)
+            st.caption(_d_sim_caption)
+
+            st.divider()
+            if st.button(
+                f"Show full trade list  ({_dn_trades:,} entered trades)",
+                key="dyn_show_full_trades",
+            ):
+                _d_full_df = _de.drop(columns=["VIX Bucket"], errors="ignore").sort_values("Date").reset_index(drop=True)
+                _d_render_table(_d_full_df)
+                st.caption(_d_sim_caption)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 3: Playing Around (AI sandbox)
