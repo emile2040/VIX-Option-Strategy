@@ -257,6 +257,112 @@ with tab_pricer:
             st.markdown("**Regime Reference**")
             st.dataframe(REGIME_TABLE, hide_index=True, use_container_width=True)
 
+    # ── VIX Historical Analysis ───────────────────────────────────────────────
+    st.divider()
+    st.header("VIX Historical Analysis")
+
+    _vh = st.session_state.vix_history
+    if _vh is None:
+        st.info("Load VIX historical data in the **Short Put Spreads on VIX** tab to see this section.")
+    else:
+        _close  = _vh["CLOSE"]
+        _dates  = pd.to_datetime(_vh["Date"])
+        _yr_min = _dates.dt.year.min()
+        _yr_max = _dates.dt.year.max()
+
+        _atl_val  = _close.min()
+        _atl_date = _vh.loc[_close.idxmin(), "Date"]
+        _atl_date = pd.to_datetime(_atl_date).strftime("%b %Y")
+        _ath_val  = _close.max()
+        _ath_date = _vh.loc[_close.idxmax(), "Date"]
+        _ath_date = pd.to_datetime(_ath_date).strftime("%b %Y")
+        _mean_val   = _close.mean()
+        _median_val = _close.median()
+        _normal_pct = ((_close >= 12) & (_close <= 25)).mean() * 100
+        _n_days     = len(_vh)
+
+        # Metric cards
+        hm1, hm2, hm3, hm4 = st.columns(4)
+        hm1.metric("All-time low",    f"{_atl_val:.2f}", delta=_atl_date,    delta_color="off")
+        hm2.metric("All-time high",   f"{_ath_val:.2f}", delta=_ath_date,    delta_color="off")
+        hm3.metric("Long-run mean",   f"{_mean_val:.2f}", delta=f"Median: {_median_val:.2f}", delta_color="off")
+        hm4.metric("Normal range",    "12–25",  delta=f"~{_normal_pct:.0f}% of trading days", delta_color="off")
+
+        # Regime bar chart
+        VH_REGIMES = [
+            (0,  12, "< 12  Ultra low",   "#5a9e6f"),
+            (12, 15, "12–15  Low",        "#a8d5a2"),
+            (15, 20, "15–20  Normal",     "#5b7bbf"),
+            (20, 25, "20–25  Elevated",   "#a0b4d9"),
+            (25, 30, "25–30  High",       "#c8a84b"),
+            (30, 40, "30–40  Stress",     "#b06030"),
+            (40, 9999, "> 40  Crisis",    "#7a2e10"),
+        ]
+        _reg_pcts   = []
+        _reg_labels = []
+        _reg_colors = []
+        for lo, hi, label, color in VH_REGIMES:
+            pct = ((_close >= lo) & (_close < hi)).mean() * 100
+            _reg_pcts.append(pct)
+            _reg_labels.append(label)
+            _reg_colors.append(color)
+
+        fig_reg = go.Figure(go.Bar(
+            x=_reg_labels, y=_reg_pcts,
+            marker_color=_reg_colors,
+            text=[f"{p:.1f}%" for p in _reg_pcts],
+            textposition="outside", textfont=dict(size=11),
+        ))
+        fig_reg.update_layout(
+            title=f"Days spent in each VIX regime ({_yr_min}–{_yr_max})",
+            xaxis_title=None,
+            yaxis=dict(title="% of trading days", ticksuffix="%", range=[0, max(_reg_pcts) * 1.2]),
+            template="plotly_dark",
+            margin=dict(l=40, r=40, t=50, b=40), height=360,
+            showlegend=False,
+        )
+        st.plotly_chart(fig_reg, use_container_width=True)
+
+        # Annual average VIX chart with min–max shading
+        _vh2 = _vh.copy()
+        _vh2["Year"] = pd.to_datetime(_vh2["Date"]).dt.year
+        _ann = _vh2.groupby("Year")["CLOSE"].agg(avg="mean", lo="min", hi="max").reset_index()
+
+        fig_ann = go.Figure()
+        fig_ann.add_trace(go.Scatter(
+            x=_ann["Year"], y=_ann["hi"],
+            mode="lines", line=dict(width=0),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig_ann.add_trace(go.Scatter(
+            x=_ann["Year"], y=_ann["lo"],
+            mode="lines", line=dict(width=0),
+            fill="tonexty",
+            fillcolor="rgba(210, 150, 130, 0.25)",
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig_ann.add_trace(go.Scatter(
+            x=_ann["Year"], y=_ann["avg"],
+            mode="lines+markers",
+            line=dict(color="#5b7bbf", width=2),
+            marker=dict(size=6, color="#5b7bbf"),
+            name="Annual avg VIX",
+        ))
+        fig_ann.add_hline(y=_mean_val, line_dash="dash", line_color="tomato",
+                          annotation_text=f"Mean {_mean_val:.2f}",
+                          annotation_position="right")
+        fig_ann.update_layout(
+            title=f"Annual average VIX ({_yr_min}–{_yr_max})",
+            xaxis=dict(title=None, tickmode="linear", dtick=3),
+            yaxis=dict(title="VIX level", rangemode="tozero"),
+            template="plotly_dark",
+            margin=dict(l=40, r=80, t=50, b=40), height=380,
+            showlegend=False,
+        )
+        st.plotly_chart(fig_ann, use_container_width=True)
+
+        st.caption(f"Source: CBOE VIX daily closing levels {_yr_min}–{_yr_max}  ·  n={_n_days:,} trading days")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2: Short Put Spreads on VIX
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -268,18 +374,18 @@ with tab_spreads:
     sp1, sp2 = st.columns(2, gap="large")
     with sp1:
         st.markdown("**Short Put**")
-        short_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=14.0,  step=0.5,  format="%.2f", key="short_strike")
-        short_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=-0.10, step=0.05, format="%.2f", key="short_vol_shift",
+        short_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=19.0,  step=0.5,  format="%.2f", key="short_strike")
+        short_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=-0.05, step=0.05, format="%.2f", key="short_vol_shift",
                                           help="Additive shift on σ for this leg  (e.g. −0.10 = σ − 10%)")
     with sp2:
         st.markdown("**Long Put**")
-        long_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=1.0, step=0.5,  format="%.2f", key="long_strike")
-        long_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=0.0, step=0.05, format="%.2f", key="long_vol_shift",
+        long_strike    = st.number_input("Strike",           min_value=1.0,  max_value=100.0, value=15.0, step=0.5,  format="%.2f", key="long_strike")
+        long_vol_shift = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,   value=0.05, step=0.05, format="%.2f", key="long_vol_shift",
                                          help="Additive shift on σ for this leg  (e.g. +0.10 = σ + 10%)")
 
     st.divider()
     st.markdown("**Trade Execution**")
-    tc1, tc2 = st.columns(2, gap="large")
+    tc1, tc2, tc3 = st.columns(3, gap="large")
     with tc1:
         min_days_to_expiry = st.number_input(
             "Minimum calendar days before a Wednesday expiry",
@@ -291,6 +397,12 @@ with tab_spreads:
             "Trading cost on premium  ($)",
             min_value=0.0, max_value=10.0, value=0.05, step=0.01, format="%.2f", key="trading_cost",
             help="Subtracted from net premium received",
+        )
+    with tc3:
+        n_contracts = st.number_input(
+            "Number of options to sell  (lot size 100)",
+            min_value=1, max_value=10000, value=1, step=1, key="n_contracts",
+            help="Number of put spreads sold per trade (each option = lot size 100)",
         )
 
     # ── VIX Historical Data ───────────────────────────────────────────────────
@@ -350,13 +462,50 @@ with tab_spreads:
     if sim_start >= sim_end:
         st.warning("Start date must be before end date.")
 
+    # ── VIX Entry Level Filter ────────────────────────────────────────────────
+    st.divider()
+    vf_col1, vf_col2, vf_col3 = st.columns([2, 1, 1], gap="large")
+    with vf_col1:
+        no_vix_filter = st.toggle(
+            "No VIX entry filter — trade at all VIX levels",
+            value=False, key="no_vix_filter",
+        )
+    with vf_col2:
+        vix_entry_min = st.number_input(
+            "Min Entry VIX", min_value=0.0, max_value=200.0, value=10.0,
+            step=0.5, format="%.1f", key="vix_entry_min",
+            disabled=no_vix_filter,
+            help="Only enter a trade if Spot VIX ≥ this value",
+        )
+    with vf_col3:
+        vix_entry_max = st.number_input(
+            "Max Entry VIX", min_value=0.0, max_value=200.0, value=40.0,
+            step=0.5, format="%.1f", key="vix_entry_max",
+            disabled=no_vix_filter,
+            help="Only enter a trade if Spot VIX ≤ this value",
+        )
+    if no_vix_filter:
+        vix_entry_min, vix_entry_max = 0.0, 9999.0
+    elif vix_entry_min >= vix_entry_max:
+        st.warning("Min Entry VIX must be less than Max Entry VIX.")
+
     # ── Minimum Premium Filter ────────────────────────────────────────────────
     st.divider()
-    min_premium = st.number_input(
-        "Minimum spread premium to enter trade  ($)",
-        min_value=0.0, max_value=10.0, value=0.15, step=0.01, format="%.2f", key="min_premium",
-        help="Skip the trade if the floored spread premium is below this threshold",
-    )
+    mp_col1, mp_col2 = st.columns([3, 1], gap="large")
+    with mp_col1:
+        no_min_premium = st.toggle(
+            "No minimum threshold — enter all trades",
+            value=False, key="no_min_premium",
+        )
+    with mp_col2:
+        min_premium = st.number_input(
+            "Minimum spread premium to enter trade  ($)",
+            min_value=0.0, max_value=10.0, value=0.15, step=0.01, format="%.2f",
+            key="min_premium", disabled=no_min_premium,
+            help="Skip the trade if the floored spread premium is below this threshold",
+        )
+    if no_min_premium:
+        min_premium = 0.0
 
     # ── Run Simulation ────────────────────────────────────────────────────────
     st.divider()
@@ -375,6 +524,23 @@ with tab_spreads:
             if sim_df.empty:
                 st.warning("No data in range after applying minimum DTE cutoff.")
             else:
+                # Build a fast date → closing VIX lookup for P&L at expiry
+                vix_lookup = {
+                    row["Date"].date(): float(row["CLOSE"])
+                    for _, row in vh.iterrows()
+                }
+                # Helper: nearest available VIX date on or after a given date
+                all_dates_sorted = sorted(vix_lookup.keys())
+
+                def lookup_expiry_vix(exp_date):
+                    if exp_date in vix_lookup:
+                        return vix_lookup[exp_date]
+                    # Find next available trading day
+                    for d in all_dates_sorted:
+                        if d >= exp_date:
+                            return vix_lookup[d]
+                    return None
+
                 results_rows = []
                 progress = st.progress(0, text="Computing…")
                 total = len(sim_df)
@@ -394,20 +560,35 @@ with tab_spreads:
                     long_put   = black76(F, long_strike,  r, sigma_long,  tau, "put")["price"]
 
                     spread_premium = max(short_put - long_put - trading_cost, 0.0)
+                    trade_entered  = (spread_premium >= min_premium
+                                      and vix_entry_min <= spot_vix <= vix_entry_max)
+
+                    # P&L at expiry (only for entered trades)
+                    expiry_vix   = lookup_expiry_vix(expiry) if trade_entered else None
+                    if trade_entered and expiry_vix is not None:
+                        expiry_value = (max(short_strike - expiry_vix, 0.0)
+                                        - max(long_strike  - expiry_vix, 0.0))
+                        pnl = round(n_contracts * 100 * (spread_premium - expiry_value), 2)
+                    else:
+                        expiry_value = None
+                        pnl          = None
 
                     results_rows.append({
-                        "Date":            date,
-                        "Expiry (Wed)":    expiry,
-                        "Days to Expiry":  (expiry - date).days,
-                        "Spot VIX":        round(spot_vix, 2),
-                        "Base σ":          f"{base_sigma * 100:.1f}%",
-                        "F (model)":       round(F, 4),
-                        "Short Put σ":     f"{sigma_short * 100:.1f}%",
-                        "Short Put Price": round(short_put, 4),
-                        "Long Put σ":      f"{sigma_long * 100:.1f}%",
-                        "Long Put Price":  round(long_put, 4),
-                        "Spread Premium":  round(spread_premium, 4),
-                        "Trade Entered":   spread_premium >= min_premium,
+                        "Date":             date,
+                        "Expiry (Wed)":     expiry,
+                        "Days to Expiry":   (expiry - date).days,
+                        "Spot VIX":         round(spot_vix, 2),
+                        "Base σ":           f"{base_sigma * 100:.1f}%",
+                        "F (model)":        round(F, 4),
+                        "Short Put σ":      f"{sigma_short * 100:.1f}%",
+                        "Short Put Price":  round(short_put, 4),
+                        "Long Put σ":       f"{sigma_long * 100:.1f}%",
+                        "Long Put Price":   round(long_put, 4),
+                        "Spread Premium":   round(spread_premium, 4),
+                        "Trade Entered":    trade_entered,
+                        "Expiry VIX":       round(expiry_vix, 2)   if expiry_vix   is not None else None,
+                        "Expiry Value":     round(expiry_value, 4)  if expiry_value is not None else None,
+                        "P&L ($)":          pnl,
                     })
 
                     if i % 200 == 0:
@@ -418,15 +599,294 @@ with tab_spreads:
 
         # Display results if available
         if st.session_state.sim_results is not None:
-            results = st.session_state.sim_results
-            st.markdown("**Spot check — 5 random example dates**")
-            sample_size = min(5, len(results))
-            ex_df = results.sample(n=sample_size).sort_values("Date").reset_index(drop=True)
-            st.dataframe(ex_df, use_container_width=True, hide_index=True)
-            st.caption(
-                f"{len(results):,} rows computed  ·  "
+            results  = st.session_state.sim_results
+            entered  = results[results["Trade Entered"]].copy()
+            pnl_vals = entered["P&L ($)"].dropna()
+            n_trades = len(pnl_vals)
+
+            total_pnl   = pnl_vals.sum()
+            avg_pnl     = pnl_vals.mean()     if n_trades else None
+            win_rate    = (pnl_vals > 0).mean() * 100 if n_trades else None
+            max_win     = pnl_vals.max()      if n_trades else None
+            max_loss    = pnl_vals.min()      if n_trades else None
+            avg_win     = pnl_vals[pnl_vals > 0].mean() if (pnl_vals > 0).any() else None
+            avg_loss    = pnl_vals[pnl_vals < 0].mean() if (pnl_vals < 0).any() else None
+            profit_factor = (pnl_vals[pnl_vals > 0].sum() /
+                             abs(pnl_vals[pnl_vals < 0].sum())
+                             ) if (pnl_vals < 0).any() else None
+            sharpe      = (pnl_vals.mean() / pnl_vals.std() * np.sqrt(252)
+                           ) if n_trades > 1 else None
+
+            # ── Summary statistics ────────────────────────────────────────────
+            st.divider()
+            st.subheader("Strategy Statistics")
+
+            row1 = st.columns(4)
+            row1[0].metric("Total P&L",          f"${total_pnl:,.0f}")
+            row1[1].metric("Trades entered",      f"{n_trades:,}")
+            row1[2].metric("Win rate",            f"{win_rate:.1f}%" if win_rate is not None else "—")
+            row1[3].metric("Avg P&L / trade",     f"${avg_pnl:,.0f}"  if avg_pnl  is not None else "—")
+
+            row2 = st.columns(4)
+            row2[0].metric("Max win",             f"${max_win:,.0f}"  if max_win  is not None else "—")
+            row2[1].metric("Max loss",            f"${max_loss:,.0f}" if max_loss is not None else "—")
+            row2[2].metric("Avg win / Avg loss",
+                           f"{abs(avg_win/avg_loss):.2f}x"
+                           if avg_win is not None and avg_loss is not None else "—")
+            row2[3].metric("Profit factor",       f"{profit_factor:.2f}" if profit_factor is not None else "∞")
+
+            # ── Annual P&L bar chart ──────────────────────────────────────────
+            st.divider()
+            st.subheader("Annual P&L")
+
+            entered["Year"] = pd.to_datetime(entered["Date"]).dt.year
+            annual = entered.groupby("Year")["P&L ($)"].sum().reset_index()
+            annual.columns = ["Year", "P&L ($)"]
+
+            bar_colors = ["#4caf7d" if v >= 0 else "#ff6b6b" for v in annual["P&L ($)"]]
+            fig_annual = go.Figure(go.Bar(
+                x=annual["Year"].astype(str),
+                y=annual["P&L ($)"],
+                marker_color=bar_colors,
+                text=[f"${v:,.0f}" for v in annual["P&L ($)"]],
+                textposition="outside",
+                textfont=dict(size=11),
+            ))
+            fig_annual.add_hline(y=0, line_color="white", line_width=1)
+            fig_annual.update_layout(
+                xaxis_title="Year", yaxis_title="P&L ($)",
+                template="plotly_dark",
+                margin=dict(l=40, r=40, t=30, b=40), height=380,
+                showlegend=False,
+                yaxis=dict(tickprefix="$", tickformat=",.0f"),
+            )
+            st.plotly_chart(fig_annual, use_container_width=True)
+
+            # ── P&L vs Premium scatter ────────────────────────────────────────
+            st.divider()
+            st.subheader("P&L vs Spread Premium")
+
+            fig_scatter = go.Figure(go.Scatter(
+                x=entered["Spread Premium"],
+                y=entered["P&L ($)"],
+                mode="markers",
+                marker=dict(
+                    color=entered["P&L ($)"],
+                    colorscale=[[0, "#ff6b6b"], [0.5, "#888888"], [1, "#4caf7d"]],
+                    cmin=entered["P&L ($)"].min(),
+                    cmid=0,
+                    cmax=entered["P&L ($)"].max(),
+                    size=5,
+                    opacity=0.6,
+                    colorbar=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+                ),
+                customdata=np.stack([
+                    entered["Date"].astype(str),
+                    entered["Spot VIX"],
+                    entered["Expiry VIX"].fillna(0),
+                ], axis=1),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Premium: $%{x:.4f}<br>"
+                    "P&L: $%{y:,.2f}<br>"
+                    "Entry VIX: %{customdata[1]:.2f}<br>"
+                    "Expiry VIX: %{customdata[2]:.2f}<extra></extra>"
+                ),
+            ))
+            fig_scatter.add_hline(y=0, line_color="white", line_dash="dot", line_width=1)
+            fig_scatter.update_layout(
+                xaxis=dict(title="Spread Premium ($)", tickprefix="$"),
+                yaxis=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+                template="plotly_dark",
+                margin=dict(l=40, r=40, t=30, b=40), height=420,
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+            # ── VIX bucket charts ────────────────────────────────────────────
+            st.divider()
+            st.subheader("Analysis by Entry VIX Level")
+
+            vix_min = int(np.floor(entered["Spot VIX"].min()))
+            vix_max = int(np.ceil(entered["Spot VIX"].max()))
+            # Width-1 up to 25, width-5 from 25–40, width-10 above 40
+            VIX_BINS   = list(range(vix_min, min(25, vix_max) + 1))
+            VIX_LABELS = [f"{v}–{v+1}" for v in range(vix_min, min(25, vix_max))]
+            if vix_max > 25:
+                mid_end = min(40, int(np.ceil(vix_max / 5) * 5))
+                for v in range(25, mid_end, 5):
+                    VIX_BINS.append(v + 5)
+                    VIX_LABELS.append(f"{v}–{v+5}")
+            if vix_max > 40:
+                coarse_end = int(np.ceil(vix_max / 10) * 10)
+                for v in range(40, coarse_end, 10):
+                    VIX_BINS.append(v + 10)
+                    VIX_LABELS.append(f"{v}–{v+10}")
+
+            entered["VIX Bucket"] = pd.cut(
+                entered["Spot VIX"], bins=VIX_BINS, labels=VIX_LABELS,
+                right=False, include_lowest=True
+            )
+            bucket_stats = (
+                entered.groupby("VIX Bucket", observed=True)["P&L ($)"]
+                .agg(
+                    count="count",
+                    win_rate=lambda x: (x > 0).mean() * 100,
+                    avg_pnl="mean",
+                    avg_win=lambda x: x[x > 0].mean() if (x > 0).any() else np.nan,
+                    avg_loss=lambda x: x[x < 0].mean() if (x < 0).any() else np.nan,
+                    n_wins=lambda x: (x > 0).sum(),
+                    n_losses=lambda x: (x < 0).sum(),
+                )
+                .reset_index()
+            )
+            bucket_stats = bucket_stats[bucket_stats["count"] > 0]
+            bx = bucket_stats["VIX Bucket"].astype(str)
+
+            # Chart 1 — Win Rate %
+            fig_wr = go.Figure(go.Bar(
+                x=bx, y=bucket_stats["win_rate"],
+                marker_color=["#4caf7d" if v >= 50 else "#ff6b6b" for v in bucket_stats["win_rate"]],
+                text=[f"{v:.1f}%<br><sub>{int(c)}</sub>" for v, c in zip(bucket_stats["win_rate"], bucket_stats["count"])],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            fig_wr.add_hline(y=50, line_dash="dash", line_color="white", line_width=1,
+                             annotation_text="50%", annotation_position="right")
+            fig_wr.update_layout(
+                title="Win Rate % by Entry VIX", xaxis_title="Entry VIX range",
+                yaxis=dict(title="Win rate (%)", range=[0, 115], ticksuffix="%"),
+                template="plotly_dark", margin=dict(l=40, r=40, t=50, b=40),
+                height=370, showlegend=False,
+            )
+            st.plotly_chart(fig_wr, use_container_width=True)
+
+            # Chart 2 — Average Trade P&L
+            fig_ap = go.Figure(go.Bar(
+                x=bx, y=bucket_stats["avg_pnl"],
+                marker_color=["#4caf7d" if v >= 0 else "#ff6b6b" for v in bucket_stats["avg_pnl"]],
+                text=[f"${v:,.0f}<br><sub>{int(c)}</sub>" for v, c in zip(bucket_stats["avg_pnl"], bucket_stats["count"])],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            fig_ap.add_hline(y=0, line_color="white", line_width=1)
+            fig_ap.update_layout(
+                title="Average Trade P&L by Entry VIX", xaxis_title="Entry VIX range",
+                yaxis=dict(title="Avg P&L ($)", tickprefix="$", tickformat=",.0f"),
+                template="plotly_dark", margin=dict(l=40, r=40, t=50, b=40),
+                height=370, showlegend=False,
+            )
+            st.plotly_chart(fig_ap, use_container_width=True)
+
+            # Chart 3 — Number of wins vs losses
+            fig_wl = go.Figure()
+            fig_wl.add_trace(go.Bar(
+                name="Wins", x=bx, y=bucket_stats["n_wins"],
+                marker_color="#4caf7d",
+                text=bucket_stats["n_wins"].astype(int),
+                textposition="outside", textfont=dict(size=11),
+            ))
+            fig_wl.add_trace(go.Bar(
+                name="Losses", x=bx, y=bucket_stats["n_losses"],
+                marker_color="#ff6b6b",
+                text=bucket_stats["n_losses"].astype(int),
+                textposition="outside", textfont=dict(size=11),
+            ))
+            fig_wl.update_layout(
+                title="Number of Wins vs Losses by Entry VIX", xaxis_title="Entry VIX range",
+                yaxis_title="Number of trades", barmode="group",
+                template="plotly_dark", margin=dict(l=40, r=40, t=50, b=40),
+                height=370, legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            )
+            st.plotly_chart(fig_wl, use_container_width=True)
+
+            # Chart 4 — Avg win P&L vs avg loss P&L
+            fig_wlp = go.Figure()
+            fig_wlp.add_trace(go.Bar(
+                name="Avg Win", x=bx, y=bucket_stats["avg_win"],
+                marker_color="#4caf7d",
+                text=[f"${v:,.0f}" if pd.notna(v) else "" for v in bucket_stats["avg_win"]],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            fig_wlp.add_trace(go.Bar(
+                name="Avg Loss", x=bx, y=bucket_stats["avg_loss"],
+                marker_color="#ff6b6b",
+                text=[f"${v:,.0f}" if pd.notna(v) else "" for v in bucket_stats["avg_loss"]],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            fig_wlp.add_hline(y=0, line_color="white", line_width=1)
+            fig_wlp.update_layout(
+                title="Average Win P&L vs Average Loss P&L by Entry VIX", xaxis_title="Entry VIX range",
+                yaxis=dict(title="Avg P&L ($)", tickprefix="$", tickformat=",.0f"),
+                barmode="group", template="plotly_dark",
+                margin=dict(l=40, r=40, t=50, b=40), height=370,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            )
+            st.plotly_chart(fig_wlp, use_container_width=True)
+
+            # Trade count caption
+            count_caption = "  ·  ".join(
+                f"{row['VIX Bucket']}: {int(row['count'])}"
+                for _, row in bucket_stats.iterrows()
+            )
+            st.caption(f"Trades per VIX bucket  —  {count_caption}")
+
+            # ── Shared helpers for trade tables ──────────────────────────────
+            def colour_pnl(val):
+                if not isinstance(val, (int, float)) or pd.isna(val):
+                    return ""
+                return "color: #4caf7d" if val >= 0 else "color: #ff6b6b"
+
+            TRADE_COL_CONFIG = {
+                "Date":             st.column_config.DateColumn(     "Date",      width=90),
+                "Expiry (Wed)":     st.column_config.DateColumn(     "Expiry",    width=90),
+                "Days to Expiry":   st.column_config.NumberColumn(   "DTE",       width=50),
+                "Spot VIX":         st.column_config.NumberColumn(   "VIX",       width=60),
+                "Base σ":           st.column_config.TextColumn(     "Base σ",    width=65),
+                "F (model)":        st.column_config.NumberColumn(   "F",         width=65),
+                "Short Put σ":      st.column_config.TextColumn(     "S σ",       width=60),
+                "Short Put Price":  st.column_config.NumberColumn(   "S Price",   width=70),
+                "Long Put σ":       st.column_config.TextColumn(     "L σ",       width=60),
+                "Long Put Price":   st.column_config.NumberColumn(   "L Price",   width=70),
+                "Spread Premium":   st.column_config.NumberColumn(   "Premium",   width=75),
+                "Trade Entered":    st.column_config.CheckboxColumn( "Trade?",    width=60),
+                "Expiry VIX":       st.column_config.NumberColumn(   "Exp VIX",   width=70),
+                "Expiry Value":     st.column_config.NumberColumn(   "Exp Value", width=80),
+                "P&L ($)":          st.column_config.TextColumn(     "P&L ($)",   width=80),
+            }
+            TRADE_FMT = {
+                "Spread Premium": "{:.4f}",
+                "Expiry Value":   "{:.4f}",
+                "P&L ($)":        lambda v: f"${v:,.2f}" if pd.notna(v) else "—",
+            }
+
+            def render_trade_table(df):
+                st.dataframe(
+                    df.style.format(TRADE_FMT, na_rep="—").map(colour_pnl, subset=["P&L ($)"]),
+                    use_container_width=True, hide_index=True,
+                    column_config=TRADE_COL_CONFIG,
+                )
+
+            sim_caption = (
                 f"Min DTE = {min_days_to_expiry}d (next Wed)  ·  "
                 f"Short K={short_strike} (σ {short_vol_shift:+.2f})  ·  "
                 f"Long K={long_strike} (σ {long_vol_shift:+.2f})  ·  "
-                f"Cost ${trading_cost:.2f}  ·  Min premium ${min_premium:.2f}"
+                f"Cost ${trading_cost:.2f}  ·  Min premium ${min_premium:.2f}  ·  "
+                f"n={n_contracts}  ·  "
+                f"P&L = n × 100 × (Spread Premium − Expiry Value)"
             )
+
+            # ── Spot check ───────────────────────────────────────────────────
+            st.divider()
+            st.markdown("**Spot check — 5 random example dates**")
+            sample_size = min(5, len(results))
+            ex_df = results.sample(n=sample_size).sort_values("Date").reset_index(drop=True)
+            render_trade_table(ex_df)
+            st.caption(sim_caption)
+
+            # ── Full trade list ───────────────────────────────────────────────
+            st.divider()
+            if st.button(
+                f"Show full trade list  ({n_trades:,} entered trades)",
+                key="show_full_trades",
+            ):
+                full_df = entered.drop(columns=["VIX Bucket"], errors="ignore").sort_values("Date").reset_index(drop=True)
+                render_trade_table(full_df)
+                st.caption(sim_caption)
