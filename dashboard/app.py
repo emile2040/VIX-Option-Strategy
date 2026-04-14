@@ -930,10 +930,12 @@ with tab_spreads:
                 "P&L ($)":        st.column_config.TextColumn(     "P&L ($)",   width=80),
             }
             TRADE_FMT = {
+                "Spot VIX":     "{:.3f}",
                 "F (model)":    "{:.3f}",
                 "Leg 1 Price":  "{:.3f}",
                 "Leg 2 Price":  "{:.3f}",
                 "Net Premium":  "{:.3f}",
+                "Expiry VIX":   "{:.3f}",
                 "Expiry Value": "{:.3f}",
                 "P&L ($)":      lambda v: f"${v:,.2f}" if pd.notna(v) else "—",
             }
