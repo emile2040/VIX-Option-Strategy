@@ -26,17 +26,18 @@ st.set_page_config(
 
 st.title("VIX Option Strategy Dashboard")
 
-tab_pricer, tab_spreads, tab_dynamic, tab_optimizer, tab_sandbox = st.tabs([
+tab_pricer, tab_spreads, tab_dynamic, tab_optimizer, tab_put_opt, tab_sandbox = st.tabs([
     "Futures & Options Pricer",
     "VIX Fixed Put Strikes",
     "Dynamic Put Spreads Strikes",
-    "🔍 Optimizer",
+    "🔍 Spread Optimizer",
+    "🔍 Put Optimizer",
     "🧪 Playing Around",
 ])
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for key, val in [("live", None), ("vix_history", None), ("sim_results", None),
-                  ("dyn_sim_results", None), ("opt_results", None)]:
+                  ("dyn_sim_results", None), ("opt_results", None), ("put_opt_results", None)]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -1711,6 +1712,7 @@ with tab_optimizer:
                 _o_bsig  = sigma_from_vix(_o_spot)
                 _o_rows1.append({
                     "spot":  _o_spot,
+                    "year":  _o_date.year,
                     "F":     vix_futures_price(_o_spot, kappa, theta_bar, _o_bsig, r, _o_tau) + futures_bump,
                     "sig1":  max(_o_bsig + opt_short_vs, 0.01),
                     "sig2":  max(_o_bsig + opt_long_vs,  0.01),
@@ -1734,6 +1736,7 @@ with tab_optimizer:
 
             # Extract numpy arrays
             _oa_spot = _o_pre["spot"].values
+            _oa_year = _o_pre["year"].values
             _oa_F    = _o_pre["F"].values
             _oa_sig1 = _o_pre["sig1"].values
             _oa_sig2 = _o_pre["sig2"].values
@@ -1781,6 +1784,12 @@ with tab_optimizer:
                             continue
                         _o_wins   = _o_bp[_o_bp > 0]
                         _o_losses = _o_bp[_o_bp < 0]
+                        # Year-based stability
+                        _o_byr     = _oa_year[_o_bm]
+                        _o_yr_avgs = [float(_o_bp[_o_byr == y].mean())
+                                      for y in np.unique(_o_byr)]
+                        _o_prof_yrs   = sum(1 for a in _o_yr_avgs if a > 0)
+                        _o_min_yr_avg = float(min(_o_yr_avgs)) if _o_yr_avgs else np.nan
                         _o_res.append({
                             "VIX Bucket":    _o_lbl,
                             "H-Dist":        int(_o_hd),
@@ -1793,6 +1802,9 @@ with tab_optimizer:
                             "Max Loss":      float(np.min(_o_bp)),
                             "Profit Factor": (float(_o_wins.sum() / abs(_o_losses.sum()))
                                               if len(_o_losses) > 0 else np.nan),
+                            "Prof. Years":   _o_prof_yrs,
+                            "Min Yr Avg":    _o_min_yr_avg,
+                            "Complexity":    abs(int(_o_hd)) + int(_o_sd),
                         })
 
                     _o_cnt += 1
@@ -1820,16 +1832,22 @@ with tab_optimizer:
             _o_bkt_order = sorted(_opt["VIX Bucket"].unique(), key=_o_bkt_sort)
 
             _O_CFG = {
-                "VIX Bucket":    st.column_config.TextColumn(   "VIX Range",   width=90),
-                "H-Dist":        st.column_config.NumberColumn( "H-Dist",      width=65,  format="%d"),
-                "Spread Width":  st.column_config.NumberColumn( "Width",       width=55,  format="%d"),
-                "Trades":        st.column_config.NumberColumn( "Trades",      width=60,  format="%d"),
-                "Avg P&L":       st.column_config.NumberColumn( "Avg P&L",     width=85,  format="$%.0f"),
-                "Total P&L":     st.column_config.NumberColumn( "Total P&L",   width=90,  format="$%.0f"),
-                "Win Rate":      st.column_config.NumberColumn( "Win %",       width=65,  format="%.1f"),
-                "Max Win":       st.column_config.NumberColumn( "Max Win",     width=80,  format="$%.0f"),
-                "Max Loss":      st.column_config.NumberColumn( "Max Loss",    width=80,  format="$%.0f"),
-                "Profit Factor": st.column_config.NumberColumn( "P.Factor",    width=75,  format="%.2f"),
+                "VIX Bucket":    st.column_config.TextColumn(   "VIX Range",    width=90),
+                "H-Dist":        st.column_config.NumberColumn( "H-Dist",       width=65,  format="%d"),
+                "Spread Width":  st.column_config.NumberColumn( "Width",        width=55,  format="%d"),
+                "Trades":        st.column_config.NumberColumn( "Trades",       width=60,  format="%d"),
+                "Avg P&L":       st.column_config.NumberColumn( "Avg P&L",      width=85,  format="$%.0f"),
+                "Total P&L":     st.column_config.NumberColumn( "Total P&L",    width=90,  format="$%.0f"),
+                "Win Rate":      st.column_config.NumberColumn( "Win %",        width=65,  format="%.1f"),
+                "Max Win":       st.column_config.NumberColumn( "Max Win",      width=80,  format="$%.0f"),
+                "Max Loss":      st.column_config.NumberColumn( "Max Loss",     width=80,  format="$%.0f"),
+                "Profit Factor": st.column_config.NumberColumn( "P.Factor",     width=75,  format="%.2f"),
+                "Prof. Years":   st.column_config.NumberColumn( "Prof. Yrs",    width=75,  format="%d",
+                                     help="Number of calendar years with positive average P&L"),
+                "Min Yr Avg":    st.column_config.NumberColumn( "Min Yr Avg",   width=85,  format="$%.0f",
+                                     help="Worst calendar-year average P&L — lower = more volatile across years"),
+                "Complexity":    st.column_config.NumberColumn( "Complexity",   width=80,  format="%d",
+                                     help="abs(H-Dist) + Spread Width — lower = simpler/tighter parameters"),
             }
 
             def _o_clr(val):
@@ -1841,7 +1859,7 @@ with tab_optimizer:
             st.subheader("Best Combination per VIX Bucket")
             # Deduplicate across the whole grid before picking the best per bucket
             _opt_dedup = (
-                _opt.sort_values(["Avg P&L", "Spread Width"], ascending=[False, True])
+                _opt.sort_values(["Avg P&L", "Complexity"], ascending=[False, True])
                     .assign(_avg_key=(_opt["Avg P&L"] * 100).round(0))
                     .groupby(["VIX Bucket", "H-Dist", "_avg_key"], sort=False)
                     .first()
@@ -1849,7 +1867,7 @@ with tab_optimizer:
                     .drop(columns=["_avg_key"])
             )
             _opt_best = (
-                _opt_dedup.sort_values("Avg P&L", ascending=False)
+                _opt_dedup.sort_values(["Avg P&L", "Complexity"], ascending=[False, True])
                     .groupby("VIX Bucket", sort=False)
                     .first()
                     .reset_index()
@@ -1870,10 +1888,10 @@ with tab_optimizer:
 
             for _o_bkt in _o_bkt_order:
                 _o_bdf = _opt[_opt["VIX Bucket"] == _o_bkt].sort_values(
-                    ["Avg P&L", "Spread Width"], ascending=[False, True]
+                    ["Avg P&L", "Complexity"], ascending=[False, True]
                 )
                 # Deduplicate: within each (H-Dist, rounded Avg P&L) keep only
-                # the smallest Spread Width — eliminates floor-clamped duplicates
+                # the lowest Complexity — eliminates floor-clamped duplicates
                 _o_bdf_dedup = (
                     _o_bdf
                     .assign(_avg_key=(_o_bdf["Avg P&L"] * 100).round(0))
@@ -1881,7 +1899,7 @@ with tab_optimizer:
                     .first()
                     .reset_index()
                     .drop(columns=["_avg_key"])
-                    .sort_values("Avg P&L", ascending=False)
+                    .sort_values(["Avg P&L", "Complexity"], ascending=[False, True])
                 )
                 _o_top5  = _o_bdf_dedup.head(5).reset_index(drop=True)
                 _o_best  = _o_top5["Avg P&L"].iloc[0]
@@ -1929,6 +1947,348 @@ with tab_optimizer:
                         height=max(300, 35 * len(_o_piv) + 100),
                     )
                     st.plotly_chart(_o_fig, use_container_width=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5: Short Put Optimizer
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_put_opt:
+    st.header("🔍 Short Put Optimizer")
+    st.caption(
+        "Grid search over **Higher Strike Distance** to find the best strike "
+        "selection for each VIX entry level range — Short Put strategy (single leg)."
+    )
+
+    _pov = st.session_state.vix_history
+    _po_data_start = _pov["Date"].iloc[0].date()  if _pov is not None else datetime.date(1990, 1, 2)
+    _po_data_end   = _pov["Date"].iloc[-1].date() if _pov is not None else today
+    if _pov is not None:
+        st.caption(
+            f"VIX data loaded: {_pov['Date'].iloc[0].strftime('%d %b %Y')} → "
+            f"{_pov['Date'].iloc[-1].strftime('%d %b %Y')}  ·  {len(_pov):,} rows"
+        )
+    else:
+        st.warning("No VIX data loaded — go to the **Futures & Options Pricer** tab to download it.")
+
+    # ── Form ──────────────────────────────────────────────────────────────────
+    with st.form("put_opt_form"):
+        st.subheader("Volatility Shift")
+        _pov1, _ = st.columns(2, gap="large")
+        with _pov1:
+            st.markdown("**Short Put  (sell)**")
+            po_short_vs = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,
+                                          value=-0.05, step=0.05, format="%.2f", key="po_short_vs")
+
+        st.divider()
+        st.markdown("**Trade Execution**")
+        _potc1, _potc2, _potc3 = st.columns(3, gap="large")
+        with _potc1:
+            po_min_dte = st.number_input("Minimum calendar days before a Wednesday expiry",
+                                         min_value=1, max_value=60, value=10, step=1, key="po_min_dte")
+        with _potc2:
+            po_cost = st.number_input("Trading cost on premium  ($)", min_value=0.0, max_value=10.0,
+                                      value=0.05, step=0.01, format="%.2f", key="po_cost")
+        with _potc3:
+            po_n = st.number_input("Number of options  (lot size 100)",
+                                   min_value=1, max_value=10000, value=1, step=1, key="po_n")
+
+        st.divider()
+        st.subheader("Simulation Date Range")
+        _podr1, _podr2 = st.columns(2, gap="large")
+        with _podr1:
+            po_start = st.date_input("Start date", value=_po_data_start,
+                                     min_value=_po_data_start, max_value=_po_data_end, key="po_start")
+        with _podr2:
+            po_end = st.date_input("End date", value=_po_data_end,
+                                   min_value=_po_data_start, max_value=_po_data_end, key="po_end")
+
+        st.divider()
+        st.subheader("Search Grid")
+        _pog1, _pog2 = st.columns(2, gap="large")
+        with _pog1:
+            po_h_min = st.number_input("Min H-Strike Distance", min_value=-10, max_value=-1,
+                                       value=-5, step=1, key="po_h_min",
+                                       help="Most negative higher-strike distance to test")
+        with _pog2:
+            po_h_max = st.number_input("Max H-Strike Distance", min_value=1, max_value=10,
+                                       value=5, step=1, key="po_h_max",
+                                       help="Most positive higher-strike distance to test")
+
+        st.divider()
+        po_min_trades = st.number_input(
+            "Minimum trades per bucket to include",
+            min_value=1, max_value=200, value=10, step=1, key="po_min_trades")
+
+        st.divider()
+        po_run = st.form_submit_button("▶ Run Optimisation", type="primary")
+
+    # ── Filters (outside form) ─────────────────────────────────────────────────
+    st.divider()
+    po_apply_vix = st.toggle(
+        "Filter by VIX entry level  (only include days when VIX is within the range below)",
+        value=True, key="po_apply_vix")
+    _povf1, _povf2 = st.columns(2, gap="large")
+    with _povf1:
+        po_vix_lo = st.number_input("Min Entry VIX", min_value=0.0, max_value=200.0,
+                                    value=10.0, step=0.5, format="%.1f",
+                                    key="po_vix_lo", disabled=not po_apply_vix)
+    with _povf2:
+        po_vix_hi = st.number_input("Max Entry VIX", min_value=0.0, max_value=200.0,
+                                    value=40.0, step=0.5, format="%.1f",
+                                    key="po_vix_hi", disabled=not po_apply_vix)
+    if not po_apply_vix:
+        po_vix_lo, po_vix_hi = 0.0, 9999.0
+
+    st.divider()
+    po_apply_prem = st.toggle(
+        "Filter by premium  (only count trades when premium meets the threshold below)",
+        value=True, key="po_apply_prem")
+    po_min_prem = st.number_input("Minimum premium to receive  ($)",
+                                  min_value=0.0, max_value=10.0, value=0.15, step=0.01,
+                                  format="%.2f", key="po_min_prem",
+                                  disabled=not po_apply_prem)
+    if not po_apply_prem:
+        po_min_prem = 0.0
+
+    st.divider()
+
+    # ── Engine ────────────────────────────────────────────────────────────────
+    if _pov is None:
+        st.info("Download VIX historical data first.")
+    elif po_run and po_start >= po_end:
+        st.warning("Start date must be before end date.")
+    else:
+        if po_run:
+            import bisect as _pobisect
+
+            # ── Phase 1: precompute per-day invariants ─────────────────────
+            _po_cutoff = po_end - datetime.timedelta(days=int(po_min_dte))
+            _po_mask   = (_pov["Date"].dt.date >= po_start) & (_pov["Date"].dt.date <= _po_cutoff)
+            _po_sim_df = _pov[_po_mask].copy().reset_index(drop=True)
+
+            if _po_sim_df.empty:
+                st.warning("No data in range after applying minimum DTE cutoff.")
+                st.stop()
+
+            _po_dates_arr  = [d.date() for d in _pov["Date"]]
+            _po_closes_arr = _pov["CLOSE"].tolist()
+            _po_vix_lkup   = dict(zip(_po_dates_arr, _po_closes_arr))
+
+            def _po_lkup_evix(exp_date):
+                if exp_date in _po_vix_lkup:
+                    return _po_vix_lkup[exp_date]
+                idx = _pobisect.bisect_left(_po_dates_arr, exp_date)
+                return _po_closes_arr[idx] if idx < len(_po_closes_arr) else None
+
+            _po_ph1 = st.progress(0, text="Phase 1 — precomputing daily data…")
+            _po_rows1, _po_n1 = [], len(_po_sim_df)
+
+            for _po_i, (_, _po_r) in enumerate(_po_sim_df.iterrows()):
+                _po_date = _po_r["Date"].date()
+                _po_spot = float(_po_r["CLOSE"])
+                _po_exp  = next_wednesday(_po_date, int(po_min_dte))
+                _po_tau  = (_po_exp - _po_date).days / 365.0
+                _po_bsig = sigma_from_vix(_po_spot)
+                _po_rows1.append({
+                    "spot": _po_spot,
+                    "year": _po_date.year,
+                    "F":    vix_futures_price(_po_spot, kappa, theta_bar, _po_bsig, r, _po_tau) + futures_bump,
+                    "sig1": max(_po_bsig + po_short_vs, 0.01),
+                    "tau":  _po_tau,
+                    "evix": _po_lkup_evix(_po_exp) or np.nan,
+                })
+                if _po_i % 500 == 0:
+                    _po_ph1.progress(_po_i / _po_n1, text=f"Phase 1 — {_po_i:,}/{_po_n1:,}")
+            _po_ph1.empty()
+
+            _po_pre = pd.DataFrame(_po_rows1)
+            _po_pre = _po_pre[
+                (_po_pre["spot"] >= po_vix_lo) & (_po_pre["spot"] <= po_vix_hi)
+            ].reset_index(drop=True)
+
+            if _po_pre.empty:
+                st.warning("No trading days in the VIX entry range. Widen the filter.")
+                st.stop()
+
+            _poa_spot = _po_pre["spot"].values
+            _poa_year = _po_pre["year"].values
+            _poa_F    = _po_pre["F"].values
+            _poa_sig1 = _po_pre["sig1"].values
+            _poa_tau  = _po_pre["tau"].values
+            _poa_evix = _po_pre["evix"].values
+
+            _po_vlo = int(np.floor(_poa_spot.min()))
+            _po_vhi = int(np.ceil( _poa_spot.max()))
+            _po_bins, _po_lbls = build_vix_buckets(_po_vlo, _po_vhi)
+            _poa_bkt = pd.cut(_poa_spot, bins=_po_bins, labels=_po_lbls,
+                              right=False, include_lowest=True).astype(str)
+
+            # ── Phase 2: grid search over H-Dist ──────────────────────────
+            _po_h_vals = list(range(po_h_min, 0)) + list(range(1, po_h_max + 1))
+            _po_total  = len(_po_h_vals)
+            _po_ph2 = st.progress(0, text=f"Phase 2 — searching {_po_total} H-Dist values…")
+            _po_res = []
+
+            for _po_idx, _po_hd in enumerate(_po_h_vals):
+                _po_khi  = (np.ceil(_poa_spot) + _po_hd if _po_hd < 0
+                            else np.floor(_poa_spot) + _po_hd)
+                _po_khi  = np.maximum(_po_khi, 1.0)
+                _po_p1   = _black76_put_vec(_poa_F, _po_khi, r, _poa_sig1, _poa_tau)
+                _po_prem = np.maximum(_po_p1 - po_cost, 0.0)
+                _po_in   = _po_prem >= po_min_prem
+
+                _po_ev   = np.maximum(_po_khi - _poa_evix, 0.0)
+                _po_pnl  = np.where(
+                    _po_in & ~np.isnan(_poa_evix),
+                    po_n * 100 * (_po_prem - _po_ev),
+                    np.nan,
+                )
+
+                for _po_lbl in _po_lbls:
+                    _po_bm  = (_poa_bkt == _po_lbl) & ~np.isnan(_po_pnl)
+                    _po_bp  = _po_pnl[_po_bm]
+                    if len(_po_bp) < int(po_min_trades):
+                        continue
+                    _po_wins   = _po_bp[_po_bp > 0]
+                    _po_losses = _po_bp[_po_bp < 0]
+                    # Year-based stability
+                    _po_byr     = _poa_year[_po_bm]
+                    _po_yr_avgs = [float(_po_bp[_po_byr == y].mean())
+                                   for y in np.unique(_po_byr)]
+                    _po_prof_yrs   = sum(1 for a in _po_yr_avgs if a > 0)
+                    _po_min_yr_avg = float(min(_po_yr_avgs)) if _po_yr_avgs else np.nan
+                    _po_res.append({
+                        "VIX Bucket":    _po_lbl,
+                        "H-Dist":        int(_po_hd),
+                        "Trades":        len(_po_bp),
+                        "Avg P&L":       float(np.mean(_po_bp)),
+                        "Total P&L":     float(np.sum(_po_bp)),
+                        "Win Rate":      float((_po_bp > 0).mean() * 100),
+                        "Max Win":       float(np.max(_po_bp)),
+                        "Max Loss":      float(np.min(_po_bp)),
+                        "Profit Factor": (float(_po_wins.sum() / abs(_po_losses.sum()))
+                                          if len(_po_losses) > 0 else np.nan),
+                        "Prof. Years":   _po_prof_yrs,
+                        "Min Yr Avg":    _po_min_yr_avg,
+                        "Complexity":    abs(int(_po_hd)),
+                    })
+
+                _po_ph2.progress((_po_idx + 1) / _po_total,
+                                 text=f"Phase 2 — {_po_idx + 1}/{_po_total} H-Dist values…")
+
+            _po_ph2.empty()
+
+            if not _po_res:
+                st.warning("No results — try lowering the minimum trades threshold or widening filters.")
+                st.stop()
+
+            st.session_state.put_opt_results = pd.DataFrame(_po_res)
+
+        # ── Display ──────────────────────────────────────────────────────────
+        if st.session_state.put_opt_results is not None:
+            _po_opt = st.session_state.put_opt_results
+
+            def _po_bkt_sort(s):
+                try:    return float(s.split("–")[0])
+                except: return 0.0
+
+            _po_bkt_order = sorted(_po_opt["VIX Bucket"].unique(), key=_po_bkt_sort)
+
+            _PO_CFG = {
+                "VIX Bucket":    st.column_config.TextColumn(   "VIX Range",    width=90),
+                "H-Dist":        st.column_config.NumberColumn( "H-Dist",       width=65,  format="%d"),
+                "Trades":        st.column_config.NumberColumn( "Trades",       width=60,  format="%d"),
+                "Avg P&L":       st.column_config.NumberColumn( "Avg P&L",      width=85,  format="$%.0f"),
+                "Total P&L":     st.column_config.NumberColumn( "Total P&L",    width=90,  format="$%.0f"),
+                "Win Rate":      st.column_config.NumberColumn( "Win %",        width=65,  format="%.1f"),
+                "Max Win":       st.column_config.NumberColumn( "Max Win",      width=80,  format="$%.0f"),
+                "Max Loss":      st.column_config.NumberColumn( "Max Loss",     width=80,  format="$%.0f"),
+                "Profit Factor": st.column_config.NumberColumn( "P.Factor",     width=75,  format="%.2f"),
+                "Prof. Years":   st.column_config.NumberColumn( "Prof. Yrs",    width=75,  format="%d",
+                                     help="Number of calendar years with positive average P&L"),
+                "Min Yr Avg":    st.column_config.NumberColumn( "Min Yr Avg",   width=85,  format="$%.0f",
+                                     help="Worst calendar-year average P&L — lower = more volatile across years"),
+                "Complexity":    st.column_config.NumberColumn( "Complexity",   width=80,  format="%d",
+                                     help="abs(H-Dist) — lower = closer-to-spot strike"),
+            }
+
+            def _po_clr(val):
+                if not isinstance(val, (int, float)) or pd.isna(val): return ""
+                return "color: #4caf7d" if val >= 0 else "color: #ff6b6b"
+
+            # ── Summary: best H-Dist per bucket ───────────────────────────
+            st.divider()
+            st.subheader("Best H-Strike Distance per VIX Bucket")
+            _po_best = (
+                _po_opt.sort_values(["Avg P&L", "Complexity"], ascending=[False, True])
+                       .groupby("VIX Bucket", sort=False)
+                       .first()
+                       .reset_index()
+            )
+            _po_best = _po_best.assign(
+                _s=_po_best["VIX Bucket"].map(_po_bkt_sort)
+            ).sort_values("_s").drop(columns=["_s"]).reset_index(drop=True)
+
+            st.dataframe(
+                _po_best.style.map(_po_clr, subset=["Avg P&L", "Total P&L"]),
+                use_container_width=True, hide_index=True,
+                column_config=_PO_CFG,
+            )
+
+            # ── Per-bucket top 5 + bar chart ──────────────────────────────
+            st.divider()
+            st.subheader("Full Results per VIX Bucket")
+
+            for _po_bkt in _po_bkt_order:
+                _po_bdf  = _po_opt[_po_opt["VIX Bucket"] == _po_bkt].sort_values(
+                    ["Avg P&L", "Complexity"], ascending=[False, True]
+                )
+                _po_top5 = _po_bdf.head(5).reset_index(drop=True)
+                _po_best_avg = _po_top5["Avg P&L"].iloc[0]
+                _po_best_hd  = _po_top5["H-Dist"].iloc[0]
+
+                with st.expander(
+                    f"VIX {_po_bkt}  ·  best avg P&L = ${_po_best_avg:,.0f}  "
+                    f"(H-Dist = {_po_best_hd:+d})  ·  {len(_po_bdf)} H-Dist values tested"
+                ):
+                    st.markdown("**Top 5 by Average P&L per Trade**")
+                    st.dataframe(
+                        _po_top5.drop(columns=["VIX Bucket"])
+                                .style.map(_po_clr, subset=["Avg P&L", "Total P&L"]),
+                        use_container_width=True, hide_index=True,
+                        column_config={k: v for k, v in _PO_CFG.items() if k != "VIX Bucket"},
+                    )
+
+                    # Bar chart: avg P&L by H-Dist (all values)
+                    st.markdown("**Avg P&L by H-Strike Distance**")
+                    _po_bar = _po_bdf.sort_values("H-Dist")
+                    _po_fig = go.Figure(go.Bar(
+                        x=[f"{v:+d}" for v in _po_bar["H-Dist"]],
+                        y=_po_bar["Avg P&L"],
+                        marker_color=["#4caf7d" if v >= 0 else "#ff6b6b"
+                                      for v in _po_bar["Avg P&L"]],
+                        text=[f"${v:,.0f}" for v in _po_bar["Avg P&L"]],
+                        textposition="outside",
+                        customdata=np.stack([
+                            _po_bar["Trades"],
+                            _po_bar["Win Rate"],
+                        ], axis=1),
+                        hovertemplate=(
+                            "H-Dist: %{x}<br>"
+                            "Avg P&L: $%{y:,.0f}<br>"
+                            "Trades: %{customdata[0]:.0f}<br>"
+                            "Win Rate: %{customdata[1]:.1f}%<extra></extra>"
+                        ),
+                    ))
+                    _po_fig.add_hline(y=0, line_color="white", line_width=1)
+                    _po_fig.update_layout(
+                        xaxis_title="Higher Strike Distance",
+                        yaxis=dict(title="Avg P&L ($)", tickprefix="$", tickformat=",.0f"),
+                        template="plotly_dark",
+                        margin=dict(l=40, r=40, t=20, b=40),
+                        height=340,
+                        showlegend=False,
+                    )
+                    st.plotly_chart(_po_fig, use_container_width=True)
 
 # TAB 3: Playing Around (AI sandbox)
 # ═══════════════════════════════════════════════════════════════════════════════
