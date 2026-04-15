@@ -141,8 +141,8 @@ with st.sidebar:
 
     default_V0 = float(round(live["spot"], 2)) if (live and live["spot"]) else 16.0
     V0        = st.number_input("Spot VIX  (V₀)",           min_value=5.0,  max_value=100.0, value=default_V0, step=0.5,   format="%.2f")
-    kappa     = st.slider("Mean-reversion speed  (κ)",       min_value=2.50, max_value=12.50, value=5.0,        step=0.1,   format="%.2f")
-    theta_bar = st.number_input("Long-run VIX mean  (θ̄)",   min_value=5.0,  max_value=80.0,  value=19.0,       step=0.5,   format="%.2f")
+    kappa     = st.slider("Mean-reversion speed  (κ)",       min_value=2.50, max_value=15.00, value=12.5,       step=0.1,   format="%.2f")
+    theta_bar = st.number_input("Long-run VIX mean  (θ̄)",   min_value=5.0,  max_value=80.0,  value=20.0,       step=0.5,   format="%.2f")
 
     sigma_auto = sigma_from_vix(V0)
     override   = st.checkbox("Override σ (vol-of-vol)", value=False)
@@ -153,7 +153,9 @@ with st.sidebar:
         sigma = sigma_auto
         st.info(f"σ auto-mapped from V₀: **{sigma * 100:.1f}%**")
 
-    r     = st.number_input("Risk-free rate  (r)", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
+    r            = st.number_input("Risk-free rate  (r)", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
+    futures_bump = st.number_input("Futures Bump", min_value=-10.0, max_value=10.0, value=0.0, step=0.05, format="%.2f",
+                                   help="Added to every model futures price (e.g. +0.5 raises F from 18.2 → 18.7)")
     today = datetime.date.today()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -172,6 +174,7 @@ with tab_pricer:
     rows = vix_futures_term_structure(V0, kappa, theta_bar, sigma, r, maturities)
     for i, row in enumerate(rows):
         row["Tenor"] = labels[i]
+        row["Futures Price"] = round(row["Futures Price"] + futures_bump, 4)
 
     df = pd.DataFrame(rows)[["Tenor", "Time to Expiry (yrs)", "Futures Price"]]
     df["vs. Spot"] = df["Futures Price"] - V0
@@ -180,7 +183,7 @@ with tab_pricer:
     if not isinstance(_opt_expiry_val, datetime.date):
         _opt_expiry_val = today + datetime.timedelta(days=30)
     opt_tau_preview = (_opt_expiry_val - today).days / 365.0
-    F_model_preview = vix_futures_price(V0, kappa, theta_bar, sigma, r, opt_tau_preview)
+    F_model_preview = vix_futures_price(V0, kappa, theta_bar, sigma, r, opt_tau_preview) + futures_bump
 
     # ── Futures Term Structure ────────────────────────────────────────────────
     st.header("Futures Term Structure")
@@ -232,7 +235,7 @@ with tab_pricer:
         st.divider()
         st.subheader("Live Futures vs Model  ·  " + (live.get("note") or f"fetched {live['timestamp']}"))
         live_df = pd.DataFrame(live["futures"])
-        live_df["Model Price"]   = live_df["tau"].apply(lambda t: round(vix_futures_price(V0, kappa, theta_bar, sigma, r, t), 4))
+        live_df["Model Price"]   = live_df["tau"].apply(lambda t: round(vix_futures_price(V0, kappa, theta_bar, sigma, r, t) + futures_bump, 4))
         live_df["vs. Spot"]      = live_df["price"] - V0
         live_df["Model vs Live"] = live_df["Model Price"] - live_df["price"]
         live_df = live_df.rename(columns={"expiry": "Expiry", "tau": "τ (yrs)", "price": "Live Price"})[
@@ -263,7 +266,7 @@ with tab_pricer:
         opt_type = st.selectbox("Option Type", ["Call", "Put"], index=1, key="opt_type")
     with oc2:
         opt_tau = (opt_expiry - today).days / 365.0
-        F_model = vix_futures_price(V0, kappa, theta_bar, sigma, r, opt_tau)
+        F_model = vix_futures_price(V0, kappa, theta_bar, sigma, r, opt_tau) + futures_bump
         st.metric("Model Futures Price at Expiry", f"{F_model:.4f}",
                   help=f"τ = {opt_tau:.4f} yrs  ({(opt_expiry - today).days} days)")
         strike = st.number_input("Strike  (K)", min_value=1.0, max_value=200.0,
@@ -611,7 +614,7 @@ with tab_spreads:
                     sigma1     = max(base_sigma + short_vol_shift, 0.01)
                     sigma2     = max(base_sigma + long_vol_shift,  0.01) if is_spread else None
 
-                    F      = vix_futures_price(spot_vix, kappa, theta_bar, base_sigma, r, tau)
+                    F      = vix_futures_price(spot_vix, kappa, theta_bar, base_sigma, r, tau) + futures_bump
                     price1 = black76(F, short_strike, r, sigma1, tau, "put")["price"]
                     price2 = (black76(F, long_strike, r, sigma2, tau, "put")["price"]
                               if is_spread else None)
@@ -1196,7 +1199,7 @@ with tab_dynamic:
                     _d_sigma1     = max(_d_base_sigma + dyn_short_vol_shift, 0.01)
                     _d_sigma2     = max(_d_base_sigma + dyn_long_vol_shift,  0.01)
 
-                    _d_F = vix_futures_price(_d_spot_vix, kappa, theta_bar, _d_base_sigma, r, _d_tau)
+                    _d_F = vix_futures_price(_d_spot_vix, kappa, theta_bar, _d_base_sigma, r, _d_tau) + futures_bump
 
                     _d_k_high = _dyn_higher_strike(_d_spot_vix, dyn_higher_dist)
                     _d_k_low  = max(_d_k_high - dyn_spread_distance, 1.0)
@@ -1708,7 +1711,7 @@ with tab_optimizer:
                 _o_bsig  = sigma_from_vix(_o_spot)
                 _o_rows1.append({
                     "spot":  _o_spot,
-                    "F":     vix_futures_price(_o_spot, kappa, theta_bar, _o_bsig, r, _o_tau),
+                    "F":     vix_futures_price(_o_spot, kappa, theta_bar, _o_bsig, r, _o_tau) + futures_bump,
                     "sig1":  max(_o_bsig + opt_short_vs, 0.01),
                     "sig2":  max(_o_bsig + opt_long_vs,  0.01),
                     "tau":   _o_tau,
