@@ -2306,7 +2306,7 @@ with tab_optimizer:
 
                 _ob_df = pd.DataFrame({
                     "Date":          pd.to_datetime(_ob_stored["date"]),
-                    "VIX Bucket":    _ob_bkt.values,
+                    "VIX Bucket":    _ob_bkt,
                     "Spot VIX":      np.round(_ob_sv, 2),
                     "K↑":            _ob_khi,
                     "K↓":            _ob_klo,
@@ -2726,7 +2726,7 @@ with tab_put_opt:
 
                 _pob_df = pd.DataFrame({
                     "Date":          pd.to_datetime(_pob_stored["date"]),
-                    "VIX Bucket":    _pob_bkt.values,
+                    "VIX Bucket":    _pob_bkt,
                     "Spot VIX":      np.round(_pob_sv, 2),
                     "K↑":            _pob_khi,
                     "Net Premium":   np.round(_pob_prem, 4),
