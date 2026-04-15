@@ -12,6 +12,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import anthropic as _anthropic
+from scipy.stats import norm as _norm
 from pricing.futures import vix_futures_price, vix_futures_term_structure
 from pricing.options import black76
 from data.ibkr import fetch_vix_data
@@ -25,15 +26,17 @@ st.set_page_config(
 
 st.title("VIX Option Strategy Dashboard")
 
-tab_pricer, tab_spreads, tab_dynamic, tab_sandbox = st.tabs([
+tab_pricer, tab_spreads, tab_dynamic, tab_optimizer, tab_sandbox = st.tabs([
     "Futures & Options Pricer",
     "VIX Fixed Put Strikes",
     "Dynamic Put Spreads Strikes",
+    "🔍 Optimizer",
     "🧪 Playing Around",
 ])
 
 # ── Session state ─────────────────────────────────────────────────────────────
-for key, val in [("live", None), ("vix_history", None), ("sim_results", None), ("dyn_sim_results", None)]:
+for key, val in [("live", None), ("vix_history", None), ("sim_results", None),
+                  ("dyn_sim_results", None), ("opt_results", None)]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -50,6 +53,24 @@ def sigma_from_vix(v):
         x1, y1 = SIGMA_BREAKPOINTS[i + 1]
         if x0 <= v <= x1:
             return y0 + (y1 - y0) * (v - x0) / (x1 - x0)
+
+def _black76_put_vec(F, K, r_val, sigma, T):
+    """Vectorised Black-76 put price. F, K, sigma, T are numpy arrays of the same shape."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sqrtT  = np.sqrt(np.maximum(T, 0.0))
+        denom  = sigma * sqrtT
+        log_fk = np.log(np.where(K > 0, F / np.maximum(K, 1e-10), 1.0))
+        d1 = np.where(denom > 1e-10,
+                      (log_fk + 0.5 * sigma ** 2 * T) / denom, 0.0)
+        d2  = d1 - denom
+        df  = np.exp(-r_val * np.maximum(T, 0.0))
+        price = np.where(
+            T > 0,
+            df * (K * _norm.cdf(-d2) - F * _norm.cdf(-d1)),
+            np.maximum(K - F, 0.0),
+        )
+    return np.maximum(price, 0.0)
+
 
 def build_vix_buckets(vix_min_val, vix_max_val):
     """
@@ -1534,6 +1555,378 @@ with tab_dynamic:
                 st.caption(_d_sim_caption)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4: Dynamic Strategy Optimizer
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_optimizer:
+    st.header("🔍 Dynamic Strategy Optimizer")
+    st.caption(
+        "Grid search over **Higher Strike Distance** and **Spread Width** to find "
+        "the best parameters for each VIX entry level range. "
+        "Uses the same model as the Dynamic Put Spreads tab."
+    )
+
+    _ov = st.session_state.vix_history
+    _o_data_start = _ov["Date"].iloc[0].date()  if _ov is not None else datetime.date(1990, 1, 2)
+    _o_data_end   = _ov["Date"].iloc[-1].date() if _ov is not None else today
+    if _ov is not None:
+        st.caption(
+            f"VIX data loaded: {_ov['Date'].iloc[0].strftime('%d %b %Y')} → "
+            f"{_ov['Date'].iloc[-1].strftime('%d %b %Y')}  ·  {len(_ov):,} rows"
+        )
+    else:
+        st.warning("No VIX data loaded — go to the **Futures & Options Pricer** tab to download it.")
+
+    # ── Form ──────────────────────────────────────────────────────────────────
+    with st.form("opt_form"):
+        st.subheader("Volatility Shifts")
+        _ov1, _ov2 = st.columns(2, gap="large")
+        with _ov1:
+            st.markdown("**Short Put  (sell — higher strike)**")
+            opt_short_vs = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,
+                                           value=-0.05, step=0.05, format="%.2f", key="opt_short_vs")
+        with _ov2:
+            st.markdown("**Long Put  (buy — lower strike)**")
+            opt_long_vs = st.number_input("Volatility Shift", min_value=-2.0, max_value=2.0,
+                                          value=0.05, step=0.05, format="%.2f", key="opt_long_vs")
+
+        st.divider()
+        st.markdown("**Trade Execution**")
+        _otc1, _otc2, _otc3 = st.columns(3, gap="large")
+        with _otc1:
+            opt_min_dte = st.number_input("Minimum calendar days before a Wednesday expiry",
+                                          min_value=1, max_value=60, value=10, step=1, key="opt_min_dte")
+        with _otc2:
+            opt_cost = st.number_input("Trading cost on premium  ($)", min_value=0.0, max_value=10.0,
+                                       value=0.05, step=0.01, format="%.2f", key="opt_cost")
+        with _otc3:
+            opt_n = st.number_input("Number of options  (lot size 100)",
+                                    min_value=1, max_value=10000, value=1, step=1, key="opt_n")
+
+        st.divider()
+        st.subheader("Simulation Date Range")
+        _odr1, _odr2 = st.columns(2, gap="large")
+        with _odr1:
+            opt_start = st.date_input("Start date", value=_o_data_start,
+                                      min_value=_o_data_start, max_value=_o_data_end, key="opt_start")
+        with _odr2:
+            opt_end = st.date_input("End date", value=_o_data_end,
+                                    min_value=_o_data_start, max_value=_o_data_end, key="opt_end")
+
+        st.divider()
+        st.subheader("Search Grid")
+        _og1, _og2, _og3, _og4 = st.columns(4, gap="large")
+        with _og1:
+            opt_h_min = st.number_input("Min H-Strike Distance", min_value=-10, max_value=-1,
+                                        value=-5, step=1, key="opt_h_min",
+                                        help="Most negative higher-strike distance to test (e.g. −5)")
+        with _og2:
+            opt_h_max = st.number_input("Max H-Strike Distance", min_value=1, max_value=10,
+                                        value=5, step=1, key="opt_h_max",
+                                        help="Most positive higher-strike distance to test (e.g. +5)")
+        with _og3:
+            opt_s_min = st.number_input("Min Spread Width", min_value=1, max_value=50,
+                                        value=1, step=1, key="opt_s_min")
+        with _og4:
+            opt_s_max = st.number_input("Max Spread Width", min_value=1, max_value=50,
+                                        value=15, step=1, key="opt_s_max")
+
+        st.divider()
+        opt_min_trades = st.number_input(
+            "Minimum trades per bucket to include  (removes buckets with too few data points)",
+            min_value=1, max_value=200, value=10, step=1, key="opt_min_trades")
+
+        st.divider()
+        opt_run = st.form_submit_button("▶ Run Optimisation", type="primary")
+
+    # ── Filters (outside form — live toggle) ──────────────────────────────────
+    st.divider()
+    opt_apply_vix = st.toggle(
+        "Filter by VIX entry level  (only include days when VIX is within the range below)",
+        value=True, key="opt_apply_vix")
+    _ovf1, _ovf2 = st.columns(2, gap="large")
+    with _ovf1:
+        opt_vix_lo = st.number_input("Min Entry VIX", min_value=0.0, max_value=200.0,
+                                     value=10.0, step=0.5, format="%.1f",
+                                     key="opt_vix_lo", disabled=not opt_apply_vix)
+    with _ovf2:
+        opt_vix_hi = st.number_input("Max Entry VIX", min_value=0.0, max_value=200.0,
+                                     value=40.0, step=0.5, format="%.1f",
+                                     key="opt_vix_hi", disabled=not opt_apply_vix)
+    if not opt_apply_vix:
+        opt_vix_lo, opt_vix_hi = 0.0, 9999.0
+
+    st.divider()
+    opt_apply_prem = st.toggle(
+        "Filter by premium  (only count trades when premium meets the threshold below)",
+        value=True, key="opt_apply_prem")
+    opt_min_prem = st.number_input("Minimum premium to receive  ($)",
+                                   min_value=0.0, max_value=10.0, value=0.15, step=0.01,
+                                   format="%.2f", key="opt_min_prem",
+                                   disabled=not opt_apply_prem)
+    if not opt_apply_prem:
+        opt_min_prem = 0.0
+
+    st.divider()
+
+    # ── Engine ────────────────────────────────────────────────────────────────
+    if _ov is None:
+        st.info("Download VIX historical data first.")
+    elif opt_run and opt_start >= opt_end:
+        st.warning("Start date must be before end date.")
+    else:
+        if opt_run:
+            import bisect as _obisect
+
+            # ── Phase 1: precompute per-day invariants ─────────────────────
+            _o_cutoff = opt_end - datetime.timedelta(days=int(opt_min_dte))
+            _o_mask   = (_ov["Date"].dt.date >= opt_start) & (_ov["Date"].dt.date <= _o_cutoff)
+            _o_sim_df = _ov[_o_mask].copy().reset_index(drop=True)
+
+            if _o_sim_df.empty:
+                st.warning("No data in range after applying minimum DTE cutoff.")
+                st.stop()
+
+            _o_dates_arr  = [d.date() for d in _ov["Date"]]
+            _o_closes_arr = _ov["CLOSE"].tolist()
+            _o_vix_lkup   = dict(zip(_o_dates_arr, _o_closes_arr))
+
+            def _o_lkup_evix(exp_date):
+                if exp_date in _o_vix_lkup:
+                    return _o_vix_lkup[exp_date]
+                idx = _obisect.bisect_left(_o_dates_arr, exp_date)
+                return _o_closes_arr[idx] if idx < len(_o_closes_arr) else None
+
+            _ph1 = st.progress(0, text="Phase 1 — precomputing daily data…")
+            _o_rows1, _o_n1 = [], len(_o_sim_df)
+
+            for _oi, (_, _or) in enumerate(_o_sim_df.iterrows()):
+                _o_date  = _or["Date"].date()
+                _o_spot  = float(_or["CLOSE"])
+                _o_exp   = next_wednesday(_o_date, int(opt_min_dte))
+                _o_tau   = (_o_exp - _o_date).days / 365.0
+                _o_bsig  = sigma_from_vix(_o_spot)
+                _o_rows1.append({
+                    "spot":  _o_spot,
+                    "F":     vix_futures_price(_o_spot, kappa, theta_bar, _o_bsig, r, _o_tau),
+                    "sig1":  max(_o_bsig + opt_short_vs, 0.01),
+                    "sig2":  max(_o_bsig + opt_long_vs,  0.01),
+                    "tau":   _o_tau,
+                    "evix":  _o_lkup_evix(_o_exp) or np.nan,
+                })
+                if _oi % 500 == 0:
+                    _ph1.progress(_oi / _o_n1, text=f"Phase 1 — {_oi:,}/{_o_n1:,}")
+            _ph1.empty()
+
+            _o_pre = pd.DataFrame(_o_rows1)
+
+            # Apply VIX entry filter
+            _o_pre = _o_pre[
+                (_o_pre["spot"] >= opt_vix_lo) & (_o_pre["spot"] <= opt_vix_hi)
+            ].reset_index(drop=True)
+
+            if _o_pre.empty:
+                st.warning("No trading days in the VIX entry range. Widen the filter.")
+                st.stop()
+
+            # Extract numpy arrays
+            _oa_spot = _o_pre["spot"].values
+            _oa_F    = _o_pre["F"].values
+            _oa_sig1 = _o_pre["sig1"].values
+            _oa_sig2 = _o_pre["sig2"].values
+            _oa_tau  = _o_pre["tau"].values
+            _oa_evix = _o_pre["evix"].values
+
+            # Assign VIX bucket to each day (fixed, independent of parameters)
+            _o_vlo = int(np.floor(_oa_spot.min()))
+            _o_vhi = int(np.ceil( _oa_spot.max()))
+            _o_bins, _o_lbls = build_vix_buckets(_o_vlo, _o_vhi)
+            _oa_bkt = pd.cut(_oa_spot, bins=_o_bins, labels=_o_lbls,
+                             right=False, include_lowest=True).astype(str)
+
+            # ── Phase 2: vectorised grid search ───────────────────────────
+            _o_h_vals  = list(range(opt_h_min, 0)) + list(range(1, opt_h_max + 1))
+            _o_s_vals  = list(range(opt_s_min, opt_s_max + 1))
+            _o_total   = len(_o_h_vals) * len(_o_s_vals)
+            _ph2 = st.progress(0, text=f"Phase 2 — searching {_o_total:,} combinations…")
+            _o_cnt, _o_res = 0, []
+
+            for _o_hd in _o_h_vals:
+                # k_high per day (vectorised)
+                _o_khi = (np.ceil(_oa_spot) + _o_hd if _o_hd < 0
+                          else np.floor(_oa_spot) + _o_hd)
+                for _o_sd in _o_s_vals:
+                    _o_klo  = np.maximum(_o_khi - _o_sd, 1.0)
+                    _o_p1   = _black76_put_vec(_oa_F, _o_khi, r, _oa_sig1, _oa_tau)
+                    _o_p2   = _black76_put_vec(_oa_F, _o_klo, r, _oa_sig2, _oa_tau)
+                    _o_prem = np.maximum(_o_p1 - _o_p2 - opt_cost, 0.0)
+                    _o_in   = _o_prem >= opt_min_prem
+
+                    _o_ev  = (np.maximum(_o_khi - _oa_evix, 0.0)
+                              - np.maximum(_o_klo - _oa_evix, 0.0))
+                    _o_pnl = np.where(
+                        _o_in & ~np.isnan(_oa_evix),
+                        opt_n * 100 * (_o_prem - _o_ev),
+                        np.nan,
+                    )
+
+                    # Stats per VIX bucket
+                    for _o_lbl in _o_lbls:
+                        _o_bm  = (_oa_bkt == _o_lbl) & ~np.isnan(_o_pnl)
+                        _o_bp  = _o_pnl[_o_bm]
+                        if len(_o_bp) < int(opt_min_trades):
+                            continue
+                        _o_wins   = _o_bp[_o_bp > 0]
+                        _o_losses = _o_bp[_o_bp < 0]
+                        _o_res.append({
+                            "VIX Bucket":    _o_lbl,
+                            "H-Dist":        int(_o_hd),
+                            "Spread Width":  int(_o_sd),
+                            "Trades":        len(_o_bp),
+                            "Avg P&L":       float(np.mean(_o_bp)),
+                            "Total P&L":     float(np.sum(_o_bp)),
+                            "Win Rate":      float((_o_bp > 0).mean() * 100),
+                            "Max Win":       float(np.max(_o_bp)),
+                            "Max Loss":      float(np.min(_o_bp)),
+                            "Profit Factor": (float(_o_wins.sum() / abs(_o_losses.sum()))
+                                              if len(_o_losses) > 0 else np.nan),
+                        })
+
+                    _o_cnt += 1
+                    if _o_cnt % 20 == 0:
+                        _ph2.progress(_o_cnt / _o_total,
+                                      text=f"Phase 2 — {_o_cnt:,}/{_o_total:,} combinations…")
+
+            _ph2.empty()
+
+            if not _o_res:
+                st.warning("No results — try lowering the minimum trades threshold or widening filters.")
+                st.stop()
+
+            st.session_state.opt_results = pd.DataFrame(_o_res)
+
+        # ── Display ──────────────────────────────────────────────────────────
+        if st.session_state.opt_results is not None:
+            _opt = st.session_state.opt_results
+
+            # Natural bucket order
+            def _o_bkt_sort(s):
+                try:    return float(s.split("–")[0])
+                except: return 0.0
+
+            _o_bkt_order = sorted(_opt["VIX Bucket"].unique(), key=_o_bkt_sort)
+
+            _O_CFG = {
+                "VIX Bucket":    st.column_config.TextColumn(   "VIX Range",   width=90),
+                "H-Dist":        st.column_config.NumberColumn( "H-Dist",      width=65,  format="%d"),
+                "Spread Width":  st.column_config.NumberColumn( "Width",       width=55,  format="%d"),
+                "Trades":        st.column_config.NumberColumn( "Trades",      width=60,  format="%d"),
+                "Avg P&L":       st.column_config.NumberColumn( "Avg P&L",     width=85,  format="$%.0f"),
+                "Total P&L":     st.column_config.NumberColumn( "Total P&L",   width=90,  format="$%.0f"),
+                "Win Rate":      st.column_config.NumberColumn( "Win %",       width=65,  format="%.1f"),
+                "Max Win":       st.column_config.NumberColumn( "Max Win",     width=80,  format="$%.0f"),
+                "Max Loss":      st.column_config.NumberColumn( "Max Loss",    width=80,  format="$%.0f"),
+                "Profit Factor": st.column_config.NumberColumn( "P.Factor",    width=75,  format="%.2f"),
+            }
+
+            def _o_clr(val):
+                if not isinstance(val, (int, float)) or pd.isna(val): return ""
+                return "color: #4caf7d" if val >= 0 else "color: #ff6b6b"
+
+            # ── Summary: best combo per bucket ────────────────────────────
+            st.divider()
+            st.subheader("Best Combination per VIX Bucket")
+            # Deduplicate across the whole grid before picking the best per bucket
+            _opt_dedup = (
+                _opt.sort_values(["Avg P&L", "Spread Width"], ascending=[False, True])
+                    .assign(_avg_key=(_opt["Avg P&L"] * 100).round(0))
+                    .groupby(["VIX Bucket", "H-Dist", "_avg_key"], sort=False)
+                    .first()
+                    .reset_index()
+                    .drop(columns=["_avg_key"])
+            )
+            _opt_best = (
+                _opt_dedup.sort_values("Avg P&L", ascending=False)
+                    .groupby("VIX Bucket", sort=False)
+                    .first()
+                    .reset_index()
+            )
+            _opt_best = _opt_best.assign(
+                _s=_opt_best["VIX Bucket"].map(_o_bkt_sort)
+            ).sort_values("_s").drop(columns=["_s"]).reset_index(drop=True)
+
+            st.dataframe(
+                _opt_best.style.map(_o_clr, subset=["Avg P&L", "Total P&L"]),
+                use_container_width=True, hide_index=True,
+                column_config=_O_CFG,
+            )
+
+            # ── Per-bucket top 5 + heatmap ────────────────────────────────
+            st.divider()
+            st.subheader("Top 5 per VIX Bucket")
+
+            for _o_bkt in _o_bkt_order:
+                _o_bdf = _opt[_opt["VIX Bucket"] == _o_bkt].sort_values(
+                    ["Avg P&L", "Spread Width"], ascending=[False, True]
+                )
+                # Deduplicate: within each (H-Dist, rounded Avg P&L) keep only
+                # the smallest Spread Width — eliminates floor-clamped duplicates
+                _o_bdf_dedup = (
+                    _o_bdf
+                    .assign(_avg_key=(_o_bdf["Avg P&L"] * 100).round(0))
+                    .groupby(["H-Dist", "_avg_key"], sort=False)
+                    .first()
+                    .reset_index()
+                    .drop(columns=["_avg_key"])
+                    .sort_values("Avg P&L", ascending=False)
+                )
+                _o_top5  = _o_bdf_dedup.head(5).reset_index(drop=True)
+                _o_best  = _o_top5["Avg P&L"].iloc[0]
+                _o_nhd   = _o_top5["H-Dist"].iloc[0]
+                _o_nsw   = _o_top5["Spread Width"].iloc[0]
+
+                with st.expander(
+                    f"VIX {_o_bkt}  ·  best avg P&L = ${_o_best:,.0f}  "
+                    f"(H-Dist = {_o_nhd:+d}, Width = {_o_nsw})  "
+                    f"·  {len(_o_bdf):,} combinations tested"
+                ):
+                    st.markdown("**Top 5 by Average P&L per Trade**  *(floor duplicates removed)*")
+                    st.dataframe(
+                        _o_top5.drop(columns=["VIX Bucket"])
+                               .style.map(_o_clr, subset=["Avg P&L", "Total P&L"]),
+                        use_container_width=True, hide_index=True,
+                        column_config={k: v for k, v in _O_CFG.items() if k != "VIX Bucket"},
+                    )
+
+                    # Heatmap: rows = Spread Width, cols = H-Dist
+                    st.markdown("**Avg P&L Heatmap across all combinations**")
+                    _o_piv = _o_bdf.pivot_table(
+                        index="Spread Width", columns="H-Dist",
+                        values="Avg P&L", aggfunc="first",
+                    )
+                    _o_z    = _o_piv.values
+                    _o_zabs = max(abs(np.nanmin(_o_z)), abs(np.nanmax(_o_z)), 1.0)
+                    _o_fig  = go.Figure(go.Heatmap(
+                        x=[f"{v:+d}" for v in _o_piv.columns.tolist()],
+                        y=_o_piv.index.tolist(),
+                        z=_o_z,
+                        colorscale=[[0.0, "#ff6b6b"], [0.5, "#2a2a2a"], [1.0, "#4caf7d"]],
+                        zmid=0, zmin=-_o_zabs, zmax=_o_zabs,
+                        colorbar=dict(title="Avg P&L ($)", tickprefix="$", tickformat=",.0f"),
+                        hovertemplate=(
+                            "H-Dist: %{x}<br>Spread Width: %{y}<br>"
+                            "Avg P&L: $%{z:,.0f}<extra></extra>"
+                        ),
+                    ))
+                    _o_fig.update_layout(
+                        xaxis_title="Higher Strike Distance",
+                        yaxis_title="Spread Width",
+                        template="plotly_dark",
+                        margin=dict(l=40, r=40, t=20, b=40),
+                        height=max(300, 35 * len(_o_piv) + 100),
+                    )
+                    st.plotly_chart(_o_fig, use_container_width=True)
+
 # TAB 3: Playing Around (AI sandbox)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_sandbox:
