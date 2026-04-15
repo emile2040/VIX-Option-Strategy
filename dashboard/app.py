@@ -43,7 +43,7 @@ for key, val in [("live", None), ("vix_history", None), ("sim_results", None),
         st.session_state[key] = val
 
 # ── Vol-of-vol mapping ────────────────────────────────────────────────────────
-SIGMA_BREAKPOINTS = [(10, 0.75), (15, 0.90), (22, 1.25), (35, 1.80), (50, 3.00)]
+SIGMA_BREAKPOINTS = [(10, 0.70), (15, 0.85), (22, 1.20), (35, 1.75), (50, 2.50)]
 
 def sigma_from_vix(v):
     if v <= SIGMA_BREAKPOINTS[0][0]:
@@ -391,12 +391,12 @@ def next_wednesday(trade_date, min_days):
     return target + datetime.timedelta(days=days_ahead)
 
 SIGMA_MAPPING_TABLE = pd.DataFrame([
-    {"VIX range": "≤ 10",   "σ (auto)": "75%"},
-    {"VIX range": "10–15",  "σ (auto)": "75% → 90%"},
-    {"VIX range": "15–22",  "σ (auto)": "90% → 125%"},
-    {"VIX range": "22–35",  "σ (auto)": "125% → 180%"},
-    {"VIX range": "35–50",  "σ (auto)": "180% → 300%"},
-    {"VIX range": "> 50",   "σ (auto)": "300%"},
+    {"VIX range": "≤ 10",   "σ (auto)": "70%"},
+    {"VIX range": "10–15",  "σ (auto)": "70% → 85%"},
+    {"VIX range": "15–22",  "σ (auto)": "85% → 120%"},
+    {"VIX range": "22–35",  "σ (auto)": "120% → 175%"},
+    {"VIX range": "35–50",  "σ (auto)": "175% → 250%"},
+    {"VIX range": "> 50",   "σ (auto)": "250%"},
 ])
 
 REGIME_TABLE = pd.DataFrame([
