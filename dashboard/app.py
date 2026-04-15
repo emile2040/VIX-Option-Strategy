@@ -37,7 +37,8 @@ tab_pricer, tab_spreads, tab_dynamic, tab_optimizer, tab_put_opt, tab_sandbox = 
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for key, val in [("live", None), ("vix_history", None), ("sim_results", None),
-                  ("dyn_sim_results", None), ("opt_results", None), ("put_opt_results", None)]:
+                  ("dyn_sim_results", None), ("opt_results", None), ("put_opt_results", None),
+                  ("opt_pre_data", None), ("put_opt_pre_data", None)]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -90,6 +91,298 @@ def build_vix_buckets(vix_min_val, vix_max_val):
     bins   = sorted(set([vix_min_val] + _inner + [vix_max_val]))
     labels = [f"{bins[i]}–{bins[i+1]}" for i in range(len(bins) - 1)]
     return bins, labels
+
+def _render_opt_backtest_display(entered_df, key_prefix="bt"):
+    """
+    Render full stats + charts for an optimizer back-test result.
+
+    Parameters
+    ----------
+    entered_df : pd.DataFrame
+        Rows where Trade Entered = True, with columns:
+        Date, Spot VIX, VIX Bucket, Net Premium, Expiry VIX, Expiry Value,
+        P&L ($), and optionally K↑, K↓.
+    key_prefix : str
+        Unique prefix for Streamlit widget keys (avoids duplicate-key errors).
+    """
+    _bt_pnl  = entered_df["P&L ($)"].dropna()
+    _bt_n    = len(_bt_pnl)
+    if _bt_n == 0:
+        st.warning("No completed trades in the backtest.")
+        return
+
+    # ── Summary stats ─────────────────────────────────────────────────────
+    _bt_total    = _bt_pnl.sum()
+    _bt_avg      = _bt_pnl.mean()
+    _bt_wr       = (_bt_pnl > 0).mean() * 100
+    _bt_max_win  = _bt_pnl.max()
+    _bt_max_loss = _bt_pnl.min()
+    _bt_avg_win  = _bt_pnl[_bt_pnl > 0].mean() if (_bt_pnl > 0).any() else None
+    _bt_avg_loss = _bt_pnl[_bt_pnl < 0].mean() if (_bt_pnl < 0).any() else None
+    _bt_pf       = (
+        _bt_pnl[_bt_pnl > 0].sum() / abs(_bt_pnl[_bt_pnl < 0].sum())
+        if (_bt_pnl < 0).any() else None
+    )
+
+    _btr1 = st.columns(4)
+    _btr1[0].metric("Total P&L",        f"${_bt_total:,.0f}")
+    _btr1[1].metric("Trades entered",    f"{_bt_n:,}")
+    _btr1[2].metric("Win rate",          f"{_bt_wr:.1f}%")
+    _btr1[3].metric("Avg P&L / trade",   f"${_bt_avg:,.0f}")
+
+    _btr2 = st.columns(4)
+    _btr2[0].metric("Max win",           f"${_bt_max_win:,.0f}")
+    _btr2[1].metric("Max loss",          f"${_bt_max_loss:,.0f}")
+    _btr2[2].metric(
+        "Avg win / Avg loss",
+        (f"{abs(_bt_avg_win / _bt_avg_loss):.2f}x"
+         if _bt_avg_win is not None and _bt_avg_loss is not None else "—"),
+    )
+    _btr2[3].metric("Profit factor",     f"{_bt_pf:.2f}" if _bt_pf is not None else "∞")
+
+    # ── Annual P&L bar ────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Annual P&L")
+    _btc = entered_df.copy()
+    _btc["Year"] = pd.to_datetime(_btc["Date"]).dt.year
+    _bt_ann = _btc.groupby("Year")["P&L ($)"].sum().reset_index()
+    _bt_fig_ann = go.Figure(go.Bar(
+        x=_bt_ann["Year"].astype(str),
+        y=_bt_ann["P&L ($)"],
+        marker_color=["#4caf7d" if v >= 0 else "#ff6b6b" for v in _bt_ann["P&L ($)"]],
+        text=[f"${v:,.0f}" for v in _bt_ann["P&L ($)"]],
+        textposition="outside", textfont=dict(size=11),
+    ))
+    _bt_fig_ann.add_hline(y=0, line_color="white", line_width=1)
+    _bt_fig_ann.update_layout(
+        xaxis_title="Year",
+        yaxis=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+        template="plotly_dark", showlegend=False,
+        margin=dict(l=40, r=40, t=30, b=40), height=380,
+    )
+    st.plotly_chart(_bt_fig_ann, use_container_width=True, key=f"{key_prefix}_ann")
+
+    # ── P&L vs Premium scatter ────────────────────────────────────────────
+    st.divider()
+    st.subheader("P&L vs Net Premium")
+    _bt_fig_sc = go.Figure(go.Scatter(
+        x=entered_df["Net Premium"],
+        y=entered_df["P&L ($)"],
+        mode="markers",
+        marker=dict(
+            color=entered_df["P&L ($)"],
+            colorscale=[[0, "#ff6b6b"], [0.5, "#888888"], [1, "#4caf7d"]],
+            cmin=entered_df["P&L ($)"].min(), cmid=0,
+            cmax=entered_df["P&L ($)"].max(),
+            size=5, opacity=0.6,
+            colorbar=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+        ),
+        customdata=np.stack([
+            entered_df["Date"].astype(str),
+            entered_df["Spot VIX"],
+            entered_df["Expiry VIX"].fillna(0),
+        ], axis=1),
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "Premium: $%{x:.4f}<br>"
+            "P&L: $%{y:,.2f}<br>"
+            "Entry VIX: %{customdata[1]:.2f}<br>"
+            "Expiry VIX: %{customdata[2]:.2f}<extra></extra>"
+        ),
+    ))
+    _bt_fig_sc.add_hline(y=0, line_color="white", line_dash="dot", line_width=1)
+    _bt_fig_sc.update_layout(
+        xaxis=dict(title="Net Premium ($)", tickprefix="$"),
+        yaxis=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+        template="plotly_dark",
+        margin=dict(l=40, r=40, t=30, b=40), height=420,
+    )
+    st.plotly_chart(_bt_fig_sc, use_container_width=True, key=f"{key_prefix}_sc")
+
+    # ── P&L Distribution ──────────────────────────────────────────────────
+    st.divider()
+    st.subheader("P&L Distribution")
+    _bt_gains  = _bt_pnl[_bt_pnl >= 0]
+    _bt_losses = _bt_pnl[_bt_pnl <  0]
+    _bt_bin    = max(1.0, round((_bt_pnl.max() - _bt_pnl.min()) / 60 / 5) * 5)
+    _bt_fig_d  = go.Figure()
+    _bt_fig_d.add_trace(go.Histogram(
+        x=_bt_gains,  xbins=dict(size=_bt_bin),
+        marker_color="#4caf7d", name="Gains", opacity=0.85,
+    ))
+    _bt_fig_d.add_trace(go.Histogram(
+        x=_bt_losses, xbins=dict(size=_bt_bin),
+        marker_color="#ff6b6b", name="Losses", opacity=0.85,
+    ))
+    _bt_fig_d.add_vline(x=0, line_color="white", line_dash="dot", line_width=1.5)
+    _bt_fig_d.update_layout(
+        barmode="overlay",
+        xaxis=dict(title="P&L ($)", tickprefix="$", tickformat=",.0f"),
+        yaxis=dict(title="Number of trades"),
+        template="plotly_dark",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=40, r=40, t=30, b=40), height=380,
+    )
+    _bt_pct_w = 100 * len(_bt_gains) / len(_bt_pnl)
+    st.plotly_chart(_bt_fig_d, use_container_width=True, key=f"{key_prefix}_dist")
+    st.caption(
+        f"Gains: {len(_bt_gains):,} ({_bt_pct_w:.1f}%)  ·  "
+        f"Losses: {len(_bt_losses):,} ({100 - _bt_pct_w:.1f}%)  ·  "
+        f"Bin size: ${_bt_bin:,.0f}"
+    )
+
+    # ── Analysis by Entry VIX ─────────────────────────────────────────────
+    st.divider()
+    st.subheader("Analysis by Entry VIX Level")
+    _bt_vmin = int(np.floor(entered_df["Spot VIX"].min()))
+    _bt_vmax = int(np.ceil( entered_df["Spot VIX"].max()))
+    _bt_vb, _bt_vl = build_vix_buckets(_bt_vmin, _bt_vmax)
+    _btc["VIX Bucket"] = pd.cut(
+        _btc["Spot VIX"], bins=_bt_vb, labels=_bt_vl,
+        right=False, include_lowest=True,
+    )
+    _bt_bks = (
+        _btc.groupby("VIX Bucket", observed=True)["P&L ($)"]
+        .agg(
+            count    = "count",
+            win_rate = lambda x: (x > 0).mean() * 100,
+            avg_pnl  = "mean",
+            avg_win  = lambda x: x[x > 0].mean() if (x > 0).any() else np.nan,
+            avg_loss = lambda x: x[x < 0].mean() if (x < 0).any() else np.nan,
+            n_wins   = lambda x: (x > 0).sum(),
+            n_losses = lambda x: (x < 0).sum(),
+        )
+        .reset_index()
+    )
+    _bt_bks = _bt_bks[_bt_bks["count"] > 0]
+    _bt_bx  = _bt_bks["VIX Bucket"].astype(str)
+
+    # Win Rate
+    _bt_fig_wr = go.Figure(go.Bar(
+        x=_bt_bx, y=_bt_bks["win_rate"],
+        marker_color=["#4caf7d" if v >= 50 else "#ff6b6b" for v in _bt_bks["win_rate"]],
+        text=[f"{v:.1f}%<br><sub>{int(c)}</sub>"
+              for v, c in zip(_bt_bks["win_rate"], _bt_bks["count"])],
+        textposition="outside", textfont=dict(size=11),
+    ))
+    _bt_fig_wr.add_hline(y=50, line_dash="dash", line_color="white", line_width=1,
+                         annotation_text="50%", annotation_position="right")
+    _bt_fig_wr.update_layout(
+        title="Win Rate % by Entry VIX", xaxis_title="Entry VIX range",
+        yaxis=dict(title="Win rate (%)", range=[0, 115], ticksuffix="%"),
+        template="plotly_dark", margin=dict(l=40, r=40, t=50, b=40),
+        height=370, showlegend=False,
+    )
+    st.plotly_chart(_bt_fig_wr, use_container_width=True, key=f"{key_prefix}_wr")
+
+    # Avg Trade P&L
+    _bt_fig_ap = go.Figure(go.Bar(
+        x=_bt_bx, y=_bt_bks["avg_pnl"],
+        marker_color=["#4caf7d" if v >= 0 else "#ff6b6b" for v in _bt_bks["avg_pnl"]],
+        text=[f"${v:,.0f}<br><sub>{int(c)}</sub>"
+              for v, c in zip(_bt_bks["avg_pnl"], _bt_bks["count"])],
+        textposition="outside", textfont=dict(size=11),
+    ))
+    _bt_fig_ap.add_hline(y=0, line_color="white", line_width=1)
+    _bt_fig_ap.update_layout(
+        title="Average Trade P&L by Entry VIX", xaxis_title="Entry VIX range",
+        yaxis=dict(title="Avg P&L ($)", tickprefix="$", tickformat=",.0f"),
+        template="plotly_dark", margin=dict(l=40, r=40, t=50, b=40),
+        height=370, showlegend=False,
+    )
+    st.plotly_chart(_bt_fig_ap, use_container_width=True, key=f"{key_prefix}_ap")
+
+    # Wins vs Losses count
+    _bt_fig_wl = go.Figure()
+    _bt_fig_wl.add_trace(go.Bar(
+        name="Wins", x=_bt_bx, y=_bt_bks["n_wins"], marker_color="#4caf7d",
+        text=_bt_bks["n_wins"].astype(int), textposition="outside", textfont=dict(size=11),
+    ))
+    _bt_fig_wl.add_trace(go.Bar(
+        name="Losses", x=_bt_bx, y=_bt_bks["n_losses"], marker_color="#ff6b6b",
+        text=_bt_bks["n_losses"].astype(int), textposition="outside", textfont=dict(size=11),
+    ))
+    _bt_fig_wl.update_layout(
+        title="Number of Wins vs Losses by Entry VIX", xaxis_title="Entry VIX range",
+        yaxis_title="Number of trades", barmode="group",
+        template="plotly_dark", margin=dict(l=40, r=40, t=50, b=40), height=370,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    )
+    st.plotly_chart(_bt_fig_wl, use_container_width=True, key=f"{key_prefix}_wl")
+
+    # Avg Win vs Avg Loss
+    _bt_fig_wp = go.Figure()
+    _bt_fig_wp.add_trace(go.Bar(
+        name="Avg Win", x=_bt_bx, y=_bt_bks["avg_win"], marker_color="#4caf7d",
+        text=[f"${v:,.0f}" if pd.notna(v) else "" for v in _bt_bks["avg_win"]],
+        textposition="outside", textfont=dict(size=11),
+    ))
+    _bt_fig_wp.add_trace(go.Bar(
+        name="Avg Loss", x=_bt_bx, y=_bt_bks["avg_loss"], marker_color="#ff6b6b",
+        text=[f"${v:,.0f}" if pd.notna(v) else "" for v in _bt_bks["avg_loss"]],
+        textposition="outside", textfont=dict(size=11),
+    ))
+    _bt_fig_wp.add_hline(y=0, line_color="white", line_width=1)
+    _bt_fig_wp.update_layout(
+        title="Average Win P&L vs Average Loss P&L by Entry VIX",
+        xaxis_title="Entry VIX range",
+        yaxis=dict(title="Avg P&L ($)", tickprefix="$", tickformat=",.0f"),
+        barmode="group", template="plotly_dark",
+        margin=dict(l=40, r=40, t=50, b=40), height=370,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    )
+    st.plotly_chart(_bt_fig_wp, use_container_width=True, key=f"{key_prefix}_wp")
+
+    # Trade count caption
+    st.caption("  ·  ".join(
+        f"{row['VIX Bucket']}: {int(row['count'])}"
+        for _, row in _bt_bks.iterrows()
+    ))
+
+    # ── Full trade list ───────────────────────────────────────────────────
+    st.divider()
+    _bt_show_cols = [c for c in
+                     ["Date", "VIX Bucket", "Spot VIX", "K↑", "K↓",
+                      "Net Premium", "Expiry VIX", "Expiry Value", "P&L ($)"]
+                     if c in entered_df.columns]
+    if st.button(
+        f"Show full trade list  ({_bt_n:,} entered trades)",
+        key=f"{key_prefix}_show_trades",
+    ):
+        def _bt_clr(val):
+            if not isinstance(val, (int, float)) or pd.isna(val): return ""
+            return "color: #4caf7d" if val >= 0 else "color: #ff6b6b"
+
+        _bt_col_cfg = {
+            "Date":         st.column_config.DateColumn(   "Date",       width=90),
+            "VIX Bucket":   st.column_config.TextColumn(   "Bucket",     width=75),
+            "Spot VIX":     st.column_config.NumberColumn( "VIX",        width=60),
+            "K↑":           st.column_config.NumberColumn( "K↑",         width=50),
+            "K↓":           st.column_config.NumberColumn( "K↓",         width=50),
+            "Net Premium":  st.column_config.NumberColumn( "Premium",    width=75),
+            "Expiry VIX":   st.column_config.NumberColumn( "Exp VIX",    width=70),
+            "Expiry Value": st.column_config.NumberColumn( "Exp Value",  width=80),
+            "P&L ($)":      st.column_config.NumberColumn( "P&L ($)",    width=85,
+                                format="$%.2f"),
+        }
+        _bt_fmt = {
+            "Spot VIX":     "{:.3f}",
+            "K↑":           "{:.0f}",
+            "K↓":           "{:.0f}",
+            "Net Premium":  "{:.3f}",
+            "Expiry VIX":   "{:.3f}",
+            "Expiry Value": "{:.3f}",
+        }
+        st.dataframe(
+            entered_df[_bt_show_cols]
+            .sort_values("Date").reset_index(drop=True)
+            .style.format({k: v for k, v in _bt_fmt.items() if k in _bt_show_cols},
+                          na_rep="—")
+            .map(_bt_clr, subset=["P&L ($)"]),
+            use_container_width=True, hide_index=True,
+            column_config={k: v for k, v in _bt_col_cfg.items() if k in _bt_show_cols},
+        )
+
 
 def next_wednesday(trade_date, min_days):
     """First Wednesday at least min_days calendar days after trade_date."""
@@ -1711,6 +2004,7 @@ with tab_optimizer:
                 _o_tau   = (_o_exp - _o_date).days / 365.0
                 _o_bsig  = sigma_from_vix(_o_spot)
                 _o_rows1.append({
+                    "date":  _o_date,
                     "spot":  _o_spot,
                     "year":  _o_date.year,
                     "F":     vix_futures_price(_o_spot, kappa, theta_bar, _o_bsig, r, _o_tau) + futures_bump,
@@ -1733,6 +2027,9 @@ with tab_optimizer:
             if _o_pre.empty:
                 st.warning("No trading days in the VIX entry range. Widen the filter.")
                 st.stop()
+
+            # Persist pre-computed data for the backtest section below
+            st.session_state["opt_pre_data"] = _o_pre
 
             # Extract numpy arrays
             _oa_spot = _o_pre["spot"].values
@@ -1948,6 +2245,84 @@ with tab_optimizer:
                     )
                     st.plotly_chart(_o_fig, use_container_width=True)
 
+            # ── Backtest: apply per-bucket optimal params to every day ─────────
+            _ob_stored = st.session_state.get("opt_pre_data")
+            if _ob_stored is not None:
+                st.divider()
+                st.subheader("📊 Backtest: Optimized Strategy Applied")
+                st.caption(
+                    "Each trading day is assigned its VIX bucket's best H-Dist and Spread Width "
+                    "from the table above, then the same premium and VIX entry filters are applied. "
+                    "This shows the aggregate performance of always using the locally optimal parameters."
+                )
+
+                # Best params lookup: bucket → (H-Dist, Spread Width)
+                _ob_map = {
+                    row["VIX Bucket"]: (int(row["H-Dist"]), int(row["Spread Width"]))
+                    for _, row in _opt_best.iterrows()
+                }
+
+                # Bucket assignment for stored pre-data
+                _ob_sv  = _ob_stored["spot"].values
+                _ob_vlo = int(np.floor(_ob_sv.min()))
+                _ob_vhi = int(np.ceil( _ob_sv.max()))
+                _ob_bns, _ob_lbs = build_vix_buckets(_ob_vlo, _ob_vhi)
+                _ob_bkt = pd.cut(_ob_sv, bins=_ob_bns, labels=_ob_lbs,
+                                 right=False, include_lowest=True).astype(str)
+
+                # Per-day optimal H-Dist and Spread Width (NaN when no best found)
+                _ob_hd = np.array(
+                    [(_ob_map[b][0] if b in _ob_map else np.nan) for b in _ob_bkt],
+                    dtype=float,
+                )
+                _ob_sw = np.array(
+                    [(_ob_map[b][1] if b in _ob_map else np.nan) for b in _ob_bkt],
+                    dtype=float,
+                )
+
+                # Vectorised strikes
+                _ob_khi = np.where(_ob_hd < 0, np.ceil(_ob_sv) + _ob_hd, np.floor(_ob_sv) + _ob_hd)
+                _ob_klo = np.maximum(_ob_khi - _ob_sw, 1.0)
+
+                # Premiums and P&L
+                _ob_F   = _ob_stored["F"].values
+                _ob_s1  = _ob_stored["sig1"].values
+                _ob_s2  = _ob_stored["sig2"].values
+                _ob_tau = _ob_stored["tau"].values
+                _ob_ev_vix = _ob_stored["evix"].values
+
+                _ob_p1   = _black76_put_vec(_ob_F, _ob_khi, r, _ob_s1, _ob_tau)
+                _ob_p2   = _black76_put_vec(_ob_F, _ob_klo, r, _ob_s2, _ob_tau)
+                _ob_prem = np.maximum(_ob_p1 - _ob_p2 - opt_cost, 0.0)
+                _ob_in   = (_ob_prem >= opt_min_prem) & ~np.isnan(_ob_hd)
+
+                _ob_ev   = (np.maximum(_ob_khi - _ob_ev_vix, 0.0)
+                            - np.maximum(_ob_klo - _ob_ev_vix, 0.0))
+                _ob_pnl  = np.where(
+                    _ob_in & ~np.isnan(_ob_ev_vix),
+                    opt_n * 100 * (_ob_prem - _ob_ev),
+                    np.nan,
+                )
+
+                _ob_df = pd.DataFrame({
+                    "Date":          pd.to_datetime(_ob_stored["date"]),
+                    "VIX Bucket":    _ob_bkt.values,
+                    "Spot VIX":      np.round(_ob_sv, 2),
+                    "K↑":            _ob_khi,
+                    "K↓":            _ob_klo,
+                    "Net Premium":   np.round(_ob_prem, 4),
+                    "Trade Entered": _ob_in & ~np.isnan(_ob_ev_vix),
+                    "Expiry VIX":    np.where(np.isnan(_ob_ev_vix), np.nan, np.round(_ob_ev_vix, 2)),
+                    "Expiry Value":  np.round(_ob_ev, 4),
+                    "P&L ($)":       np.round(_ob_pnl, 2),
+                })
+
+                _ob_ent = _ob_df[_ob_df["Trade Entered"]].copy()
+                if _ob_ent.empty:
+                    st.warning("No trades matched the backtest criteria.")
+                else:
+                    _render_opt_backtest_display(_ob_ent, key_prefix="opt_bt")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 5: Short Put Optimizer
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2089,6 +2464,7 @@ with tab_put_opt:
                 _po_tau  = (_po_exp - _po_date).days / 365.0
                 _po_bsig = sigma_from_vix(_po_spot)
                 _po_rows1.append({
+                    "date": _po_date,
                     "spot": _po_spot,
                     "year": _po_date.year,
                     "F":    vix_futures_price(_po_spot, kappa, theta_bar, _po_bsig, r, _po_tau) + futures_bump,
@@ -2108,6 +2484,9 @@ with tab_put_opt:
             if _po_pre.empty:
                 st.warning("No trading days in the VIX entry range. Widen the filter.")
                 st.stop()
+
+            # Persist pre-computed data for the backtest section below
+            st.session_state["put_opt_pre_data"] = _po_pre
 
             _poa_spot = _po_pre["spot"].values
             _poa_year = _po_pre["year"].values
@@ -2289,6 +2668,80 @@ with tab_put_opt:
                         showlegend=False,
                     )
                     st.plotly_chart(_po_fig, use_container_width=True)
+
+            # ── Backtest: apply per-bucket optimal H-Dist to every day ────────
+            _pob_stored = st.session_state.get("put_opt_pre_data")
+            if _pob_stored is not None:
+                st.divider()
+                st.subheader("📊 Backtest: Optimized Strategy Applied")
+                st.caption(
+                    "Each trading day is assigned its VIX bucket's best H-Dist from the table above, "
+                    "then the same premium and VIX entry filters are applied."
+                )
+
+                # Best H-Dist lookup: bucket → H-Dist
+                _pob_map = {
+                    row["VIX Bucket"]: int(row["H-Dist"])
+                    for _, row in _po_best.iterrows()
+                }
+
+                # Bucket assignment
+                _pob_sv  = _pob_stored["spot"].values
+                _pob_vlo = int(np.floor(_pob_sv.min()))
+                _pob_vhi = int(np.ceil( _pob_sv.max()))
+                _pob_bns, _pob_lbs = build_vix_buckets(_pob_vlo, _pob_vhi)
+                _pob_bkt = pd.cut(_pob_sv, bins=_pob_bns, labels=_pob_lbs,
+                                  right=False, include_lowest=True).astype(str)
+
+                # Per-day optimal H-Dist
+                _pob_hd = np.array(
+                    [(_pob_map[b] if b in _pob_map else np.nan) for b in _pob_bkt],
+                    dtype=float,
+                )
+
+                # Vectorised strikes (single leg)
+                _pob_khi = np.where(
+                    _pob_hd < 0,
+                    np.ceil(_pob_sv)  + _pob_hd,
+                    np.floor(_pob_sv) + _pob_hd,
+                )
+                _pob_khi = np.maximum(_pob_khi, 1.0)
+
+                # Premium and P&L
+                _pob_F      = _pob_stored["F"].values
+                _pob_s1     = _pob_stored["sig1"].values
+                _pob_tau    = _pob_stored["tau"].values
+                _pob_ev_vix = _pob_stored["evix"].values
+
+                _pob_p1   = _black76_put_vec(_pob_F, _pob_khi, r, _pob_s1, _pob_tau)
+                _pob_prem = np.maximum(_pob_p1 - po_cost, 0.0)
+                _pob_in   = (_pob_prem >= po_min_prem) & ~np.isnan(_pob_hd)
+
+                _pob_ev  = np.maximum(_pob_khi - _pob_ev_vix, 0.0)
+                _pob_pnl = np.where(
+                    _pob_in & ~np.isnan(_pob_ev_vix),
+                    po_n * 100 * (_pob_prem - _pob_ev),
+                    np.nan,
+                )
+
+                _pob_df = pd.DataFrame({
+                    "Date":          pd.to_datetime(_pob_stored["date"]),
+                    "VIX Bucket":    _pob_bkt.values,
+                    "Spot VIX":      np.round(_pob_sv, 2),
+                    "K↑":            _pob_khi,
+                    "Net Premium":   np.round(_pob_prem, 4),
+                    "Trade Entered": _pob_in & ~np.isnan(_pob_ev_vix),
+                    "Expiry VIX":    np.where(np.isnan(_pob_ev_vix), np.nan,
+                                             np.round(_pob_ev_vix, 2)),
+                    "Expiry Value":  np.round(_pob_ev, 4),
+                    "P&L ($)":       np.round(_pob_pnl, 2),
+                })
+
+                _pob_ent = _pob_df[_pob_df["Trade Entered"]].copy()
+                if _pob_ent.empty:
+                    st.warning("No trades matched the backtest criteria.")
+                else:
+                    _render_opt_backtest_display(_pob_ent, key_prefix="put_opt_bt")
 
 # TAB 3: Playing Around (AI sandbox)
 # ═══════════════════════════════════════════════════════════════════════════════
