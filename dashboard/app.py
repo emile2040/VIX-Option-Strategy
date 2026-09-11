@@ -56,6 +56,20 @@ def sigma_from_vix(v):
         if x0 <= v <= x1:
             return y0 + (y1 - y0) * (v - x0) / (x1 - x0)
 
+def _sigma_from_vix_vec(K_arr):
+    """Vectorised piecewise-linear vol-of-vol mapped from strike K (numpy array)."""
+    K   = np.asarray(K_arr, dtype=float)
+    bps = SIGMA_BREAKPOINTS
+    out = np.full(K.shape, float(bps[-1][1]))
+    out = np.where(K <= bps[0][0], bps[0][1], out)
+    for i in range(len(bps) - 1):
+        x0, y0 = bps[i]
+        x1, y1 = bps[i + 1]
+        out = np.where((K > x0) & (K <= x1),
+                       y0 + (y1 - y0) * (K - x0) / (x1 - x0), out)
+    return out
+
+
 def _black76_put_vec(F, K, r_val, sigma, T):
     """Vectorised Black-76 put price. F, K, sigma, T are numpy arrays of the same shape."""
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -565,8 +579,17 @@ with tab_pricer:
                   help=f"τ = {opt_tau:.4f} yrs  ({(opt_expiry - today).days} days)")
         strike = st.number_input("Strike  (K)", min_value=1.0, max_value=200.0,
                                  value=round(F_model, 1), step=0.5, format="%.2f", key="opt_strike")
+        sigma_opt_auto = sigma_from_vix(strike)
+        override_opt = st.checkbox("Override option σ", value=False)
+        sigma_opt = (
+            st.number_input("Option σ — manual", min_value=0.01, max_value=5.0,
+                            value=round(sigma_opt_auto, 2), step=0.05, format="%.2f")
+            if override_opt else sigma_opt_auto
+        )
+        if not override_opt:
+            st.info(f"Option σ auto-mapped from K={strike:.2f}: **{sigma_opt * 100:.1f}%**")
     with oc3:
-        result = black76(F_model, strike, r, sigma, opt_tau, opt_type.lower())
+        result = black76(F_model, strike, r, sigma_opt, opt_tau, opt_type.lower())
         st.metric("Option Price", f"{result['price']:.4f}")
 
     st.subheader("Greeks")
@@ -584,7 +607,7 @@ with tab_pricer:
 | Futures Price  (F) | {F_model:.4f} |
 | Strike  (K) | {strike:.4f} |
 | Time to Expiry  (T) | {opt_tau:.4f} yrs  ({(opt_expiry - today).days} days) |
-| Vol-of-Vol  (σ) | {sigma * 100:.2f}% |
+| Vol-of-Vol  (σ) | {sigma_opt * 100:.2f}% |
 | Risk-free rate  (r) | {r * 100:.2f}% |
 | d1 | {result['d1'] if result['d1'] is not None else '—'} |
 | d2 | {result['d2'] if result['d2'] is not None else '—'} |
@@ -594,10 +617,13 @@ with tab_pricer:
     with st.expander("Vol-of-Vol Reference", expanded=False):
         col_map, col_regime = st.columns(2, gap="large")
         with col_map:
-            st.markdown("**σ Mapping (auto from Spot VIX)**")
+            st.markdown("**σ Mapping (auto from Strike K)**")
             st.dataframe(SIGMA_MAPPING_TABLE, hide_index=True, use_container_width=True)
-            st.caption(f"Current V₀ = {V0:.2f}  →  σ = {sigma_auto * 100:.1f}%"
-                       + ("  *(overridden)*" if override else ""))
+            st.caption(
+                f"Futures σ: V₀ = {V0:.2f}  →  {sigma_auto * 100:.1f}%  ·  "
+                f"Option σ: K = {strike:.2f}  →  {sigma_opt * 100:.1f}%"
+                + ("  *(overridden)*" if override_opt else "")
+            )
         with col_regime:
             st.markdown("**Regime Reference**")
             st.dataframe(REGIME_TABLE, hide_index=True, use_container_width=True)
@@ -904,9 +930,9 @@ with tab_spreads:
                     expiry   = next_wednesday(date, int(min_days_to_expiry))
                     tau      = (expiry - date).days / 365.0
 
-                    base_sigma = sigma_from_vix(spot_vix)
-                    sigma1     = max(base_sigma + short_vol_shift, 0.01)
-                    sigma2     = max(base_sigma + long_vol_shift,  0.01) if is_spread else None
+                    base_sigma = sigma_from_vix(spot_vix)   # used only for futures pricing
+                    sigma1     = max(sigma_from_vix(short_strike) + short_vol_shift, 0.01)
+                    sigma2     = max(sigma_from_vix(long_strike)  + long_vol_shift,  0.01) if is_spread else None
 
                     F      = vix_futures_price(spot_vix, kappa, theta_bar, base_sigma, r, tau) + futures_bump
                     price1 = black76(F, short_strike, r, sigma1, tau, "put")["price"]
@@ -951,7 +977,7 @@ with tab_spreads:
                         "Expiry (Wed)":     expiry,
                         "Days to Expiry":   (expiry - date).days,
                         "Spot VIX":         round(spot_vix, 2),
-                        "Base σ":           f"{base_sigma * 100:.1f}%",
+                        "Base σ":           f"{sigma_from_vix(short_strike) * 100:.1f}%",
                         "F (model)":        round(F, 4),
                         "Leg 1 σ":          f"{sigma1 * 100:.1f}%",
                         "Leg 1 Price":      round(price1, 4),
@@ -1489,14 +1515,14 @@ with tab_dynamic:
                     _d_expiry   = next_wednesday(_d_date, int(dyn_min_dte))
                     _d_tau      = (_d_expiry - _d_date).days / 365.0
 
-                    _d_base_sigma = sigma_from_vix(_d_spot_vix)
-                    _d_sigma1     = max(_d_base_sigma + dyn_short_vol_shift, 0.01)
-                    _d_sigma2     = max(_d_base_sigma + dyn_long_vol_shift,  0.01)
-
+                    _d_base_sigma = sigma_from_vix(_d_spot_vix)   # futures pricing only
                     _d_F = vix_futures_price(_d_spot_vix, kappa, theta_bar, _d_base_sigma, r, _d_tau) + futures_bump
 
                     _d_k_high = _dyn_higher_strike(_d_spot_vix, dyn_higher_dist)
                     _d_k_low  = max(_d_k_high - dyn_spread_distance, 1.0)
+
+                    _d_sigma1 = max(sigma_from_vix(_d_k_high) + dyn_short_vol_shift, 0.01)
+                    _d_sigma2 = max(sigma_from_vix(_d_k_low)  + dyn_long_vol_shift,  0.01)
 
                     _d_price1 = black76(_d_F, _d_k_high, r, _d_sigma1, _d_tau, "put")["price"]
                     _d_price2 = black76(_d_F, _d_k_low,  r, _d_sigma2, _d_tau, "put")["price"]
@@ -1522,7 +1548,7 @@ with tab_dynamic:
                         "Spot VIX":         round(_d_spot_vix, 2),
                         "Higher Strike":    _d_k_high,
                         "Lower Strike":     _d_k_low,
-                        "Base σ":           f"{_d_base_sigma * 100:.1f}%",
+                        "Base σ":           f"{sigma_from_vix(_d_k_high) * 100:.1f}%",
                         "F (model)":        round(_d_F, 4),
                         "Leg 1 σ":          f"{_d_sigma1 * 100:.1f}%",
                         "Leg 1 Price":      round(_d_price1, 4),
@@ -2008,8 +2034,6 @@ with tab_optimizer:
                     "spot":  _o_spot,
                     "year":  _o_date.year,
                     "F":     vix_futures_price(_o_spot, kappa, theta_bar, _o_bsig, r, _o_tau) + futures_bump,
-                    "sig1":  max(_o_bsig + opt_short_vs, 0.01),
-                    "sig2":  max(_o_bsig + opt_long_vs,  0.01),
                     "tau":   _o_tau,
                     "evix":  _o_lkup_evix(_o_exp) or np.nan,
                 })
@@ -2035,8 +2059,6 @@ with tab_optimizer:
             _oa_spot = _o_pre["spot"].values
             _oa_year = _o_pre["year"].values
             _oa_F    = _o_pre["F"].values
-            _oa_sig1 = _o_pre["sig1"].values
-            _oa_sig2 = _o_pre["sig2"].values
             _oa_tau  = _o_pre["tau"].values
             _oa_evix = _o_pre["evix"].values
 
@@ -2055,13 +2077,15 @@ with tab_optimizer:
             _o_cnt, _o_res = 0, []
 
             for _o_hd in _o_h_vals:
-                # k_high per day (vectorised)
-                _o_khi = (np.ceil(_oa_spot) + _o_hd if _o_hd < 0
-                          else np.floor(_oa_spot) + _o_hd)
+                # k_high and option sigma for short leg (vectorised, per H-Dist)
+                _o_khi  = (np.ceil(_oa_spot) + _o_hd if _o_hd < 0
+                           else np.floor(_oa_spot) + _o_hd)
+                _o_sig1 = np.maximum(_sigma_from_vix_vec(_o_khi) + opt_short_vs, 0.01)
                 for _o_sd in _o_s_vals:
                     _o_klo  = np.maximum(_o_khi - _o_sd, 1.0)
-                    _o_p1   = _black76_put_vec(_oa_F, _o_khi, r, _oa_sig1, _oa_tau)
-                    _o_p2   = _black76_put_vec(_oa_F, _o_klo, r, _oa_sig2, _oa_tau)
+                    _o_sig2 = np.maximum(_sigma_from_vix_vec(_o_klo) + opt_long_vs, 0.01)
+                    _o_p1   = _black76_put_vec(_oa_F, _o_khi, r, _o_sig1, _oa_tau)
+                    _o_p2   = _black76_put_vec(_oa_F, _o_klo, r, _o_sig2, _oa_tau)
                     _o_prem = np.maximum(_o_p1 - _o_p2 - opt_cost, 0.0)
                     _o_in   = _o_prem >= opt_min_prem
 
@@ -2286,8 +2310,8 @@ with tab_optimizer:
 
                 # Premiums and P&L
                 _ob_F   = _ob_stored["F"].values
-                _ob_s1  = _ob_stored["sig1"].values
-                _ob_s2  = _ob_stored["sig2"].values
+                _ob_s1  = np.maximum(_sigma_from_vix_vec(_ob_khi) + opt_short_vs, 0.01)
+                _ob_s2  = np.maximum(_sigma_from_vix_vec(_ob_klo) + opt_long_vs,  0.01)
                 _ob_tau = _ob_stored["tau"].values
                 _ob_ev_vix = _ob_stored["evix"].values
 
@@ -2468,7 +2492,6 @@ with tab_put_opt:
                     "spot": _po_spot,
                     "year": _po_date.year,
                     "F":    vix_futures_price(_po_spot, kappa, theta_bar, _po_bsig, r, _po_tau) + futures_bump,
-                    "sig1": max(_po_bsig + po_short_vs, 0.01),
                     "tau":  _po_tau,
                     "evix": _po_lkup_evix(_po_exp) or np.nan,
                 })
@@ -2491,7 +2514,6 @@ with tab_put_opt:
             _poa_spot = _po_pre["spot"].values
             _poa_year = _po_pre["year"].values
             _poa_F    = _po_pre["F"].values
-            _poa_sig1 = _po_pre["sig1"].values
             _poa_tau  = _po_pre["tau"].values
             _poa_evix = _po_pre["evix"].values
 
@@ -2511,7 +2533,8 @@ with tab_put_opt:
                 _po_khi  = (np.ceil(_poa_spot) + _po_hd if _po_hd < 0
                             else np.floor(_poa_spot) + _po_hd)
                 _po_khi  = np.maximum(_po_khi, 1.0)
-                _po_p1   = _black76_put_vec(_poa_F, _po_khi, r, _poa_sig1, _poa_tau)
+                _po_sig1 = np.maximum(_sigma_from_vix_vec(_po_khi) + po_short_vs, 0.01)
+                _po_p1   = _black76_put_vec(_poa_F, _po_khi, r, _po_sig1, _poa_tau)
                 _po_prem = np.maximum(_po_p1 - po_cost, 0.0)
                 _po_in   = _po_prem >= po_min_prem
 
@@ -2709,7 +2732,7 @@ with tab_put_opt:
 
                 # Premium and P&L
                 _pob_F      = _pob_stored["F"].values
-                _pob_s1     = _pob_stored["sig1"].values
+                _pob_s1     = np.maximum(_sigma_from_vix_vec(_pob_khi) + po_short_vs, 0.01)
                 _pob_tau    = _pob_stored["tau"].values
                 _pob_ev_vix = _pob_stored["evix"].values
 
